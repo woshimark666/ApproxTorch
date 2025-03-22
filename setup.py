@@ -5,7 +5,6 @@ from torch.utils.cpp_extension import CppExtension, CUDAExtension, BuildExtensio
 
 cuda_functions = CUDAExtension('approxtorch.approx_gemm._C',[
         "./approxtorch/approx_gemm/csrc/int8_gemm.cu",
-        "./approxtorch/approx_gemm/csrc/int8_batch_gemm.cu",
         "./approxtorch/approx_gemm/csrc/gemm_int8_cpu.cpp",
         "./approxtorch/approx_gemm/csrc/gemm_int8_naive.cu",
     ],                   
@@ -20,7 +19,7 @@ cuda_functions = CUDAExtension('approxtorch.approx_gemm._C',[
 setup(
     name="approxtorch",
     version="1.0",
-    description="a pytorch extension for 8-bit int based conv2d and gemm",
+    description="a simulation framework for 8-bit signed approximate multiplier in CNNs",
     packages=find_packages(),
     ext_modules=[cuda_functions],    # extensions to be compiled
     install_requires=['torch'],
