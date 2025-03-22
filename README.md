@@ -63,7 +63,7 @@ class approx_lenet5(nn.Module):
         self.fc1 = approx_Linear_int8(in_features=16*4*4, out_features=120, lut=lut)
         self.fc2 = approx_Linear_int8(in_features=120, out_features=84, lut=lut)
         self.fc3 = approx_Linear_int8(in_features=84, out_features=10, lut=lut)
-                
+              
     def forward(self, x):
         x = self.conv1(x)
         x = torch.nn.functional.relu(x)
@@ -137,7 +137,6 @@ If you would like to use this in your work, please cite my paper:
   doi={10.1109/ISOCC56007.2022.10031519}}
 ```
 
-## Quote
+## Famous quote
 
 [![Readme Quotes](https://quotes-github-readme.vercel.app/api?type=horizontal&theme=dark&quote=喝可乐不加冰等于没喝)](https://github.com/piyushsuthar/github-readme-quotes)
-
