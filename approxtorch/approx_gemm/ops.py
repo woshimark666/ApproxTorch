@@ -2,7 +2,7 @@ import torch
 from torch import Tensor
 
 
-__all__ = ['gemm_int8', 'batch_gemm_int8', 'gemm_int8_naive', 'gemm_int8_old']
+__all__ = ['gemm_int8', 'batch_gemm_int8', 'gemm_int8_naive', 'gemm_int8_old', 'gemm_int8_gradient']
 
 def gemm_int8(A: Tensor, B: Tensor, C: Tensor) -> Tensor:
     return torch.ops.approxtorch.gemm_int8.default(A, B, C)
@@ -27,3 +27,7 @@ def _(a, b, c):
 
 def gemm_int8_naive(A: Tensor, B: Tensor, C: Tensor) -> Tensor:
     return torch.ops.approxtorch.gemm_int8_naive.default(A, B, C)
+
+
+def gemm_int8_gradient(A: Tensor, B: Tensor, upstream_grad: Tensor, grad_lut: Tensor) -> (Tensor, Tensor):
+    return torch.ops.approxtorch.gemm_int8_gradient.default(A, B, upstream_grad, grad_lut)
