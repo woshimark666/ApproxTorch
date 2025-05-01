@@ -10,8 +10,7 @@
 
 
 
-from .conv2d_int8 import conv2d 
-from .conv2d_int8 import conv2d_int8
+from .conv2d_int8 import conv2d_int8, conv2d
 from .conv2d_int8_naive import conv2d_naive
 from .conv2d_int8_old import conv2d_old 
 

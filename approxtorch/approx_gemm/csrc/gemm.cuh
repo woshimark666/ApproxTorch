@@ -4,7 +4,6 @@
 #include <cuda_runtime.h>
 #include <c10/cuda/CUDAGuard.h>
 
-
 #ifdef __CUDACC__
 namespace approxtorch{
 template<const int BM, const int BN, const int BK, const int NUM_THREADS>
@@ -372,6 +371,12 @@ torch::Tensor naive_gemm_int8(
     torch::Tensor& A,
     torch::Tensor& B,
     const torch::Tensor& lut
+);
+
+std::tuple<torch::Tensor, torch::Tensor> gemm_int8_gradient(
+    torch::Tensor& A,
+    torch::Tensor& B,
+    const torch::Tensor& gradient_lut
 );
 
 }
