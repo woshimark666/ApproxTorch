@@ -145,7 +145,7 @@ class conv2d(Function):
 
 
 # warp the conv2d for functional use
-def conv2d_int8(feature, weight, lut, gradient_lut, bias=None, stride:int = 1, padding:int = 0, dilation:int = 1):
+def conv2d_int8(feature, weight, lut, bias=None, stride:int = 1, padding:int = 0, dilation:int = 1):
     return conv2d.apply(feature, weight, lut, bias, stride, padding, dilation)
 
 def conv2d_int8_est(feature, weight, lut, gradient_lut, bias=None, stride:int = 1, padding:int = 0, dilation:int = 1):

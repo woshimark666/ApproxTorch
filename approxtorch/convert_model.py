@@ -3,7 +3,7 @@ import torch.nn as nn
 from approxtorch.layer import Conv2d_int8, Conv2d_int8_est, Linear_int8, Linear_int8_est 
 
 # this function convert the model into int8 approximate model
-def convert_model(model, conv2d_module, linear_module, lut, gradient_lut=None, gradient='ste'):
+def convert_model(model, lut, gradient_lut=None, gradient='ste'):
     if gradient.lower() not in ['ste', 'est']:
         raise ValueError("gradient parameter must be either 'ste' or 'est'")
     

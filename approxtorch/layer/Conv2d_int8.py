@@ -23,16 +23,18 @@ class Conv2d_int8(torch.nn.Module):
         self.dilation = dilation[0] if isinstance(dilation, tuple) else dilation
         self.weight = torch.nn.Parameter(torch.Tensor(out_channels, in_channels, self.kernel_size, self.kernel_size))
         
-        if bias == True:
+        if isinstance(self.bias, torch.Tensor):
+            self.bias = bias
+        elif bias == True:
             self.bias = torch.nn.Parameter(torch.Tensor(out_channels))
         elif bias == False or bias == None:
             self.bias = None
-        elif isinstance(bias, torch.Tensor):
-            self.bias = torch.nn.Parameter(bias)
+        else:
+            raise ValueError("Invalid bias type")
     
     
     def forward(self, x):
-        return conv2d_int8.apply(x, 
+        return conv2d_int8(x, 
                             self.weight, 
                             self.lut,
                             self.bias, 
@@ -64,15 +66,17 @@ class Conv2d_int8_est(torch.nn.Module):
         self.dilation = dilation[0] if isinstance(dilation, tuple) else dilation
         self.weight = torch.nn.Parameter(torch.Tensor(out_channels, in_channels, self.kernel_size, self.kernel_size))
         
-        if bias == True:
+        if isinstance(self.bias, torch.Tensor):
+            self.bias = torch.nn.Parameter(bias)
+        elif bias == True:
             self.bias = torch.nn.Parameter(torch.Tensor(out_channels))
         elif bias == False or bias == None:
             self.bias = None
-        elif isinstance(bias, torch.Tensor):
-            self.bias = torch.nn.Parameter(bias)
+        else:
+            raise ValueError("Invalid bias type")
     
     def forward(self, x):
-        return conv2d_int8_est.apply(x, 
+        return conv2d_int8_est(x, 
                             self.weight, 
                             self.lut,
                             self.gradient_lut,

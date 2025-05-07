@@ -17,15 +17,17 @@ class Linear_int8(torch.nn.Module):
         self.bias = bias
         self.weight = torch.nn.Parameter(torch.Tensor(out_features, in_features))
         
-        if bias == True:
+        if isinstance(self.bias, torch.Tensor):
+            self.bias = torch.nn.Parameter(bias)
+        elif bias == True:
             self.bias = torch.nn.Parameter(torch.Tensor(out_features))
         elif bias == False or bias == None:
             self.bias = None
-        elif isinstance(bias, torch.Tensor):
-            self.bias = torch.nn.Parameter(bias)
+        else:
+            raise ValueError("Invalid bias type")
     
     def forward(self, x):
-        return linear_int8.apply(x, 
+        return linear_int8(x, 
                             self.weight, 
                             self.lut, 
                             self.bias)
@@ -46,15 +48,17 @@ class Linear_int8_est(torch.nn.Module):
         self.bias = bias
         self.weight = torch.nn.Parameter(torch.Tensor(out_features, in_features))
         
-        if bias == True:
+        if isinstance(bias, torch.Tensor):
+            self.bias = torch.nn.Parameter(bias)
+        elif bias == True:
             self.bias = torch.nn.Parameter(torch.Tensor(out_features))
         elif bias == False or bias == None:
             self.bias = None
-        elif isinstance(bias, torch.Tensor):
-            self.bias = torch.nn.Parameter(bias)
+        else:
+            raise ValueError("Invalid bias type")
     
     def forward(self, x):
-        return linear_int8_est.apply(x, 
+        return linear_int8_est(x, 
                             self.weight, 
                             self.lut, 
                             self.gradient_lut,
