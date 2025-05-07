@@ -29,5 +29,5 @@ def gemm_int8_naive(A: Tensor, B: Tensor, C: Tensor) -> Tensor:
     return torch.ops.approxtorch.gemm_int8_naive.default(A, B, C)
 
 
-def gemm_int8_gradient(A: Tensor, B: Tensor, upstream_grad: Tensor, grad_lut: Tensor) -> (Tensor, Tensor):
+def gemm_int8_gradient(A: Tensor, B: Tensor, upstream_grad: Tensor, grad_lut: Tensor) -> tuple[Tensor, Tensor]:
     return torch.ops.approxtorch.gemm_int8_gradient.default(A, B, upstream_grad, grad_lut)

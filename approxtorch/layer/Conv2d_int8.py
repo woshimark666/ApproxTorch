@@ -8,6 +8,7 @@ class approx_Conv2d_int8(torch.nn.Module):
                  out_channels,
                  kernel_size, 
                  lut,
+                 gradient_lut,
                  bias = True,
                  stride = 1,
                  padding = 0,
@@ -15,6 +16,7 @@ class approx_Conv2d_int8(torch.nn.Module):
         
         super().__init__()
         self.register_buffer('lut', lut)
+        self.register_buffer('gradient_lut', gradient_lut)
         # self.lut = lut
         self.in_chahnnels = in_channels
         self.out_channels = out_channels
@@ -34,6 +36,7 @@ class approx_Conv2d_int8(torch.nn.Module):
         return conv2d.apply(x, 
                             self.weight, 
                             self.lut,
+                            self.gradient_lut,
                             self.bias, 
                             self.stride, 
                             self.padding, 

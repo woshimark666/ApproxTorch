@@ -8,10 +8,12 @@ class approx_Linear_int8(torch.nn.Module):
                  in_features,
                  out_features,
                  lut,
+                 gradient_lut,
                  bias = True):
         
         super().__init__()
         self.register_buffer('lut', lut)
+        self.register_buffer('gradient_lut', gradient_lut)
         # self.lut = lut
         self.in_features = in_features
         self.out_features = out_features
