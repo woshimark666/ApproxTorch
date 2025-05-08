@@ -21,6 +21,10 @@ def convert_model(model, lut, gradient_lut=None, gradient='ste'):
                 bias = module.bias
                 new_module = Conv2d_int8(in_channels, out_channels, kernel_size, 
                                                 lut, bias, stride, padding, dilation)
+                # Transfer weights
+                new_module.weight.data.copy_(module.weight.data)
+                if bias is not None:
+                    new_module.bias.data.copy_(module.bias.data)
                 modules_to_replace.append((name, new_module))
                 
             elif isinstance(module, nn.Linear):
@@ -28,6 +32,10 @@ def convert_model(model, lut, gradient_lut=None, gradient='ste'):
                 out_features = module.out_features
                 bias = module.bias
                 new_module = Linear_int8(in_features, out_features, lut, bias)
+                # Transfer weights
+                new_module.weight.data.copy_(module.weight.data)
+                if bias is not None:
+                    new_module.bias.data.copy_(module.bias.data)
                 modules_to_replace.append((name, new_module))
     
     elif gradient.lower() == 'est':
@@ -42,6 +50,10 @@ def convert_model(model, lut, gradient_lut=None, gradient='ste'):
                 bias = module.bias
                 new_module = Conv2d_int8_est(in_channels, out_channels, kernel_size, 
                                                 lut, gradient_lut, bias, stride, padding, dilation)
+                # Transfer weights
+                new_module.weight.data.copy_(module.weight.data)
+                if bias is not None:
+                    new_module.bias.data.copy_(module.bias.data)
                 modules_to_replace.append((name, new_module))
                 
             elif isinstance(module, nn.Linear):
@@ -49,6 +61,10 @@ def convert_model(model, lut, gradient_lut=None, gradient='ste'):
                 out_features = module.out_features
                 bias = module.bias
                 new_module = Linear_int8_est(in_features, out_features, lut, gradient_lut, bias)
+                # Transfer weights
+                new_module.weight.data.copy_(module.weight.data)
+                if bias is not None:
+                    new_module.bias.data.copy_(module.bias.data)
                 modules_to_replace.append((name, new_module))
     
     
