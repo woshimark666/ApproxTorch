@@ -22,7 +22,7 @@ __global__ void gradient_compute_kernel(
     float upstream_grad = upstream_gradient[row_idx][col_idx];
     if (row_idx < M && col_idx < N){
         for(int k = 0; k < K; ++k){
-            int lut_idx = 255 * (int(A[row_idx][k]) + 127) + int(B[k][col_idx]) + 127;
+            int lut_idx = 256 * (int(A[row_idx][k]) + 128) + int(B[k][col_idx]) + 128;
             grad_a = gradient_lut[lut_idx][0];
             grad_b = gradient_lut[lut_idx][1];
             
