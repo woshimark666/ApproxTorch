@@ -178,7 +178,7 @@ class conv2d_T_class(Function):
     
     @staticmethod
     def setup_context(ctx, input, output):
-        feature, weight, lut, bias, stride, padding, dilation = input
+        feature, weight, _, _, _, bias, stride, padding, dilation = input
         ctx.save_for_backward(feature, weight)
         ctx.has_bias = bias is not None
         ctx.stride = stride

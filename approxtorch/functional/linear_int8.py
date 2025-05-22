@@ -135,7 +135,7 @@ class linear_T(Function):
     
     @staticmethod
     def setup_context(ctx, input, output):
-        feature, weight, lut, bias = input
+        feature, weight, _, _, _, bias = input
         ctx.save_for_backward(feature, weight)
         ctx.has_bias = bias is not None
     
