@@ -10,8 +10,9 @@ def quantize_tensor(x: torch.Tensor):  # scale is T/127
     x = torch.clamp(x, -127, 127)
     return x, scale
 
-def quantize_activiton_tensor_int8(x: torch.Tensor, T):  # scale is T/127, T is the trancation threshold
-    scale = T / 127
+def quantize_by_threshold(x: torch.Tensor, T: float):
+    T = abs(T)
+    scale = T / 127.
     x = torch.round(x / scale)
     x = torch.clamp(x, -127, 127)
     return x, scale
