@@ -10,8 +10,8 @@
 
 
 
-from .conv2d_int8 import conv2d_int8, conv2d_int8_est, conv2d_int8_T
-from .linear_int8 import linear_int8, linear_int8_est, linear_int8_T
+from .conv2d_int8 import conv2d_int8, conv2d_int8_est, conv2d_int8_T, conv2d_int8_est_T
+from .linear_int8 import linear_int8, linear_int8_est, linear_int8_T, linear_int8_est_T
 
 
-__all__ = ['conv2d_int8', 'conv2d_int8_est', 'conv2d_int8_T', 'linear_int8', 'linear_int8_est', 'linear_int8_T']
+__all__ = ['conv2d_int8', 'conv2d_int8_est', 'conv2d_int8_T', 'conv2d_int8_est_T', 'linear_int8', 'linear_int8_est', 'linear_int8_T', 'linear_int8_est_T']
