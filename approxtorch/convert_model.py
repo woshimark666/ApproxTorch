@@ -154,3 +154,16 @@ def convert_model_T(model, lut, t_dict, gradient='ste', gradient_lut=None, only_
         parent_module = dict(model.named_modules())[parent_name] if parent_name else model
         setattr(parent_module, attr_name, new_module)
     return model
+
+
+def stop_update_T(model):
+    for name, module in model.named_modules():
+        if isinstance(module, (Conv2d_int8_T, Linear_int8_T, Conv2d_int8_est_T, Linear_int8_est_T)):
+            module.update_T = False
+    return model
+
+def start_update_T(model):
+    for name, module in model.named_modules():
+        if isinstance(module, (Conv2d_int8_T, Linear_int8_T, Conv2d_int8_est_T, Linear_int8_est_T)):
+            module.update_T = True
+    return model

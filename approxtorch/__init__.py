@@ -10,5 +10,5 @@ from . import layer
 from . import functional
 from . import approx_gemm
 from .load_lut import load_lut, load_gradient_lut
-from .convert_model import convert_model, convert_model_T
+from .convert_model import convert_model, convert_model_T, stop_update_T, start_update_T
 from .calibration import calibrate

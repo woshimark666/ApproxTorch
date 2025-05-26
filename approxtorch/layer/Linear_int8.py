@@ -82,6 +82,8 @@ class Linear_int8_T(torch.nn.Module):
         self.bias = bias
         self.has_bias = bias is not None
         self.weight = torch.nn.Parameter(torch.Tensor(out_features, in_features))
+        self.update_T = True
+        
         if isinstance(self.bias, torch.Tensor):
             self.bias = torch.nn.Parameter(bias)
         elif bias == True:
@@ -92,9 +94,17 @@ class Linear_int8_T(torch.nn.Module):
             raise ValueError("Invalid bias type")
     
     def __repr__(self):
-        return f"Linear_int8_T(in_features={self.in_features}, out_features={self.out_features}, bias={self.has_bias}, T_feature={self.T_feature:.3f}, T_weight={self.T_weight:.3f})"
+        return f"Linear_int8_STE_T(in_features={self.in_features}, out_features={self.out_features}, bias={self.has_bias}, T_feature={self.T_feature:.3f}, T_weight={self.T_weight:.3f}), update_T={self.update_T}"
+    
+    def update_T_func(self, x, weight):
+        absmax_feature = torch.abs(x).max().item()
+        absmax_weight = torch.abs(weight).max().item()
+        self.T_feature = 0.95 * self.T_feature + 0.05 * absmax_feature
+        self.T_weight = 0.95 * self.T_weight + 0.05 * absmax_weight
     
     def forward(self, x):
+        if self.update_T:
+            self.update_T_func(x, self.weight)
         return linear_int8_T(x, 
                             self.weight, 
                             self.lut, 
@@ -121,6 +131,8 @@ class Linear_int8_est_T(torch.nn.Module):
         self.weight = torch.nn.Parameter(torch.Tensor(out_features, in_features))
         self.T_feature = T_feature
         self.T_weight = T_weight
+        self.update_T = True
+        self.has_bias = bias is not None
         
         if isinstance(bias, torch.Tensor):
             self.bias = torch.nn.Parameter(bias)
@@ -130,8 +142,19 @@ class Linear_int8_est_T(torch.nn.Module):
             self.bias = None
         else:
             raise ValueError("Invalid bias type")
+    def __repr__(self):
+        return f"Linear_int8_EST_T(in_features={self.in_features}, out_features={self.out_features}, bias={self.has_bias}, T_feature={self.T_feature:.3f}, T_weight={self.T_weight:.3f}), update_T={self.update_T}"
+    
+    def update_T_func(self, x, weight):
+        absmax_feature = torch.abs(x).max().item()
+        absmax_weight = torch.abs(weight).max().item()
+        self.T_feature = 0.95 * self.T_feature + 0.05 * absmax_feature
+        self.T_weight = 0.95 * self.T_weight + 0.05 * absmax_weight
     
     def forward(self, x):
+        if self.update_T:
+            self.update_T_func(x, self.weight)
+            
         return linear_int8_est_T(x, 
                             self.weight, 
                             self.lut,
