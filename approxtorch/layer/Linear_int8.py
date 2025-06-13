@@ -1,5 +1,5 @@
 import torch
-from approxtorch.functional import linear_int8, linear_int8_est, linear_int8_T, linear_int8_est_T
+from approxtorch.nn import linear_int8, linear_int8_est, linear_int8_T, linear_int8_est_T
 
 
 

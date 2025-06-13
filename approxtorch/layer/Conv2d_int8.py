@@ -1,13 +1,13 @@
 import torch
-from approxtorch.functional import conv2d_int8, conv2d_int8_est, conv2d_int8_T, conv2d_int8_est_T
+from approxtorch.nn import conv2d_int8, conv2d_int8_est, conv2d_int8_T, conv2d_int8_est_T
 
 class Conv2d_int8(torch.nn.Module):
     def __init__(self, 
-                 in_channels,
-                 out_channels,
-                 kernel_size, 
-                 lut,
-                 bias = True,
+                 in_channels: int,
+                 out_channels: int,
+                 kernel_size: int | tuple[int, int], 
+                 lut: torch.Tensor,
+                 bias: bool | torch.Tensor = True,
                  stride = 1,
                  padding = 0,
                  dilation = 1):
