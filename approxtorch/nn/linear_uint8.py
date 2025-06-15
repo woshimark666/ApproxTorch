@@ -48,6 +48,7 @@ class _linear_uint8_STE(Function):
         output = output - zero_point_feature * weight.sum(dim=0, keepdim=True) - \
                             zero_point_weight * feature.sum(dim=1, keepdim=True) + \
                                 feature.shape[1]*zero_point_feature*zero_point_weight
+        output = output * scale_feature * scale_weight
         
         # 3. add bias
         if bias != None:
