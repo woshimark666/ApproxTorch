@@ -3,3 +3,4 @@ approxtorch.egg-info/
 __pycache__/
 .vscode/
 test/
+dist/

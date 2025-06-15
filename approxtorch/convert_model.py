@@ -1,17 +1,20 @@
 import torch
 import torch.nn as nn
 from approxtorch.nn import Conv2d_int8_STE, Linear_int8_STE
+from typing import Literal
 
-# this function convert the model into int8 approximate model
+# this function convert the model into approximate model
 def convert_model(model, 
                   lut,
+                  qtype: Literal['int8', 'uint8'] = 'int8',
                   qmethod: tuple[str, str, str] = ('dynamic', 'tensor', 'tensor'),
-                  gradient_lut=None, gradient='ste'):
+                  gradient_lut=None, 
+                  gradient='ste'):
     if gradient.lower() not in ['ste', 'est']:
         raise ValueError("gradient parameter must be either 'ste' or 'est'")
     
     modules_to_replace = []
-
+    
     if gradient.lower() == 'ste':
         for name, module in model.named_modules():
             if isinstance(module, nn.Conv2d):
