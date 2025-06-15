@@ -8,6 +8,6 @@
 
 from . import nn
 from . import approx_gemm
-from .load_lut import load_lut, load_gradient_lut, load_uint8_lut
+from .load_lut import load_lut, load_gradient_lut
 from .convert_model import convert_model
 from .calibration import calibrate
