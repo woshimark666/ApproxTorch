@@ -1,19 +1,29 @@
 import torch
 import torch.nn as nn
-from approxtorch.nn import Conv2d_int8_STE, Linear_int8_STE
+from approxtorch.nn import Conv2d_int8_STE, Linear_int8_STE, Conv2d_uint8_STE, Linear_uint8_STE
 from typing import Literal
 
 # this function convert the model into approximate model
+# 暂时我只写了转换为dynamic quant的转换公式，static 还要考虑一下
 def convert_model(model, 
                   lut,
                   qtype: Literal['int8', 'uint8'] = 'int8',
                   qmethod: tuple[str, str, str] = ('dynamic', 'tensor', 'tensor'),
                   gradient_lut=None, 
-                  gradient='ste'):
+                  gradient='ste',
+                  conv_only=True
+                  ):
     if gradient.lower() not in ['ste', 'est']:
         raise ValueError("gradient parameter must be either 'ste' or 'est'")
     
     modules_to_replace = []
+    # print(qtype, qmethod)
+    if qtype == 'int8':
+        Conv2d = Conv2d_int8_STE
+        Linear = Linear_int8_STE
+    elif qtype == 'uint8':
+        Conv2d = Conv2d_uint8_STE
+        Linear = Linear_uint8_STE
     
     if gradient.lower() == 'ste':
         for name, module in model.named_modules():
@@ -25,7 +35,7 @@ def convert_model(model,
                 padding = module.padding
                 dilation = module.dilation
                 bias = module.bias
-                new_module = Conv2d_int8_STE(in_channels, 
+                new_module = Conv2d(in_channels, 
                                 out_channels,
                                 kernel_size,
                                 lut,
@@ -41,16 +51,16 @@ def convert_model(model,
                     new_module.bias.data.copy_(module.bias.data)
                 modules_to_replace.append((name, new_module))
                 
-            elif isinstance(module, nn.Linear):
+            elif isinstance(module, nn.Linear) and not conv_only:
                 in_features = module.in_features
                 out_features = module.out_features
                 bias = module.bias
-                new_module = Linear_int8_STE(in_features,
-                                            out_features,
-                                            lut,
-                                            qmethod[0],
-                                            qparams=None,
-                                            bias=bias)
+                new_module = Linear(in_features,
+                                    out_features,
+                                    lut,
+                                    qmethod[0],
+                                    qparams=None,
+                                    bias=bias)
                 # Transfer weights
                 new_module.weight.data.copy_(module.weight.data)
                 if bias is not None:

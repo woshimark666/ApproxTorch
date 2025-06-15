@@ -4,6 +4,7 @@ from torch.autograd import Function
 from torch.nn.modules.utils import _pair
 import math
 from . import im2col
+import approxtorch as at
 
 class _conv2d_uint8_STE(Function):
     @staticmethod
@@ -53,11 +54,11 @@ class _conv2d_uint8_STE(Function):
                 raise ValueError(f"Invalid quantization method: {qmethod}")
         
         # 2. im2col
-        feature = im2col.conv_window(feature, (Kh, Kw), stride, padding, dilation)
-        weight = im2col.conv_weight(weight)
+        feature = im2col.conv_window(feature, (Kh, Kw), stride, padding, dilation).to(torch.uint8)
+        weight = im2col.conv_weight(weight).to(torch.uint8)
         
         # 3. approximate gemm  # test phase
-        output = torch.matmul(feature, weight)
+        output = at.approx_gemm.ops.gemm_uint8(feature, weight, lut).to(torch.float)
         # the output shape is (BL, O)
         
         # 4. de-quantize
