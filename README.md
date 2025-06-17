@@ -44,12 +44,12 @@ A\B | -128  -127  -126 ....   127
 
 256 rows and 256 columns, each position represents the multiplicatoin result of the crossponding index A and B. Note that the index is not needed. An example of a exact 8-bit signed multiplier can be found in ./example/exact.txt. (Find your own way to generate this LUT, I think it is pretty easy.)
 
-### 2. Load LUT and define model
+### 2. Load LUT and define native FP32 model
 
 ```python
 import torch
-import approxtorch as ap
-from approxtorch.layer import approx_Conv2d_int8, approx_Linear_int8
+import approxtorch as at
+from approxtorch.nn import 
 import torch.nn as nn
 # we can define a simple LeNet5 with approximate layers.
 class approx_lenet5(nn.Module):
@@ -63,7 +63,7 @@ class approx_lenet5(nn.Module):
         self.fc1 = approx_Linear_int8(in_features=16*4*4, out_features=120, lut=lut)
         self.fc2 = approx_Linear_int8(in_features=120, out_features=84, lut=lut)
         self.fc3 = approx_Linear_int8(in_features=84, out_features=10, lut=lut)
-              
+  
     def forward(self, x):
         x = self.conv1(x)
         x = torch.nn.functional.relu(x)
@@ -92,13 +92,13 @@ lenet5 = approx_lenet5(lut).to(device)
 
 ## Documentation
 
-### Load LUT
+### 1. Load LUT
 
 ```Python
 import torch
-import approxtorch as ap
+import approxtorch as at
 
-lut = ap.load_lut(file_path = 'exact.txt')
+lut = at.load_lut(txt_path = 'exact.txt')
 ```
 
 ### 2. Convert model
@@ -106,18 +106,38 @@ lut = ap.load_lut(file_path = 'exact.txt')
 ```python
 # you can convert a normal model into a approximate model
 normal_model = LeNet5()
-approximate_model = ap.convert_model(model = normal_model, lut = lut, 
-             conv2d_module = ap.layer.approx_Conv2d_int8, linear_module = ap.layer.approx_Linear_int8)
+approximate_model = convert_model(model, 
+                  lut,
+                  qtype = 'int8',
+                  qmethod = ('dynamic', 'tensor', 'tensor'),
+                  gradient_lut = None, 
+                  gradient = 'ste',
+                  conv_only = False
+                  )
 ```
 
 ### 3. Define approximate layers
 
+We provide ap.nn.Conv2d_int8_STE, ap.nn.Conv2d_uint8_STE, ap.nn.Linear_int8_STE and ap.nn.Linear_uint8_STE.
+
 ```python
 # approximate Conv2d
-ap_conv2d_layer = ap.layer.approx_Conv2d_int8(in_channels, out_channels, kernel_size, lut, 
-                            bias = True, stride =1, padding = 0, dilation = 0)
+ap_conv2d_layer = ap.nn.Conv2d_int8_STE( 
+                 in_channels,
+                 out_channels,
+                 kernel_size, 
+                 lut,
+                 qmethod = ('dynamic', 'tensor', 'tensor'),
+                 qparams = None,
+                 bias = True,
+                 stride = 1,
+                 padding = 0,
+                 dilation = 1):
 # approximate Linear
-ap_linear_layer = ap.layer.approx_Linear_int8(in_features, out_features, lut, bias = True)
+ap_linear_layer = at.nn.Linear_int8_STE(in_features, out_features, lut,
+                    qmethod = 'dynamic',
+                    qparams = None,
+                    bias = True):
 ```
 
 ## Citation
