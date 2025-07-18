@@ -11,12 +11,14 @@ def convert_model(model,
                   qmethod: tuple[str, str, str] = ('dynamic', 'tensor', 'tensor'),
                   gradient_lut=None, 
                   gradient='ste',
-                  conv_only=True
+                  conv_only=True,
+                  ignore_first_conv=True
                   ):
     if gradient.lower() not in ['ste', 'est']:
         raise ValueError("gradient parameter must be either 'ste' or 'est'")
     
     modules_to_replace = []
+    conv2d_count = 0  # 新增：用于计数Conv2d层
     # print(qtype, qmethod)
     if qtype == 'int8':
         Conv2d = Conv2d_int8_STE
@@ -28,6 +30,9 @@ def convert_model(model,
     if gradient.lower() == 'ste':
         for name, module in model.named_modules():
             if isinstance(module, nn.Conv2d):
+                conv2d_count += 1
+                if ignore_first_conv and conv2d_count == 1:
+                    continue  # 跳过第一个Conv2d层
                 in_channels = module.in_channels
                 out_channels = module.out_channels
                 kernel_size = module.kernel_size
