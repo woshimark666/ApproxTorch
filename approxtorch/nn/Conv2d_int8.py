@@ -60,7 +60,7 @@ class Conv2d_int8_STE(torch.nn.Module):
     
     def __repr__(self):
         return f"Conv2d_int8_STE(in_channels={self.in_channels}, out_channels={self.out_channels}, " \
-               f"kernel_size={self.kernel_size}, qmethod={self.qmethod}, " \
+               f"kernel_size={self.kernel_size}, qmethod={self.qmethod}, feature_scale={self.scale_feature}, weight_scale={self.scale_weight}, " \
                f"bias={self.has_bias}, stride={self.stride}, padding={self.padding}, " \
                f"dilation={self.dilation}, groups={self.groups}, freeze_scales={self.frozen_scale})"
     
