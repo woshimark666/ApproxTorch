@@ -40,16 +40,26 @@ def convert_model(model,
                 padding = module.padding
                 dilation = module.dilation
                 bias = module.bias
+                groups = module.groups
+                if qmethod[0] == 'static':
+                    scale_feature = torch.randn(())
+                    scale_weight = torch.randn(out_channels)
+                else:
+                    scale_feature = None
+                    scale_weight = None
+                    
                 new_module = Conv2d(in_channels, 
                                 out_channels,
                                 kernel_size,
                                 lut,
                                 qmethod,
-                                qparams=None,
+                                scale_feature=scale_feature,
+                                scale_weight=scale_weight,
                                 bias=bias,
                                 stride=stride,
                                 padding=padding,
-                                dilation=dilation)
+                                dilation=dilation,
+                                groups=groups)
                 # Transfer weights
                 new_module.weight.data.copy_(module.weight.data)
                 if bias is not None:

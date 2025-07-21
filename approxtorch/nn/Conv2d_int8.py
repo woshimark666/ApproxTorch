@@ -31,7 +31,7 @@ class Conv2d_int8_STE(torch.nn.Module):
         self.groups = groups
         self.weight = torch.nn.Parameter(
             torch.Tensor(out_channels, in_channels, self.kernel_size[0], self.kernel_size[1]))
-        self.forze_scale = True
+        self.frozen_scale = True
         
         match qmethod[0]:
             case 'static':
@@ -59,17 +59,29 @@ class Conv2d_int8_STE(torch.nn.Module):
             raise ValueError("Invalid bias type")
     
     def __repr__(self):
-        return f"Conv2d_int8_STE(in_channels={self.in_chahnnels}, out_channels={self.out_channels}, " \
+        return f"Conv2d_int8_STE(in_channels={self.in_channels}, out_channels={self.out_channels}, " \
                f"kernel_size={self.kernel_size}, qmethod={self.qmethod}, " \
                f"bias={self.has_bias}, stride={self.stride}, padding={self.padding}, " \
-               f"dilation={self.dilation}, groups={self.groups}, freeze_scales={self.freeze_scales})"
+               f"dilation={self.dilation}, groups={self.groups}, freeze_scales={self.frozen_scale})"
     
     
     def updata_scale(self, x, weight):
         absmax_feature = torch.abs(x).max()
         absmax_weight = torch.abs(weight).max()
+        self.scale_feature = 0.95 * self.scale_feature + 0.05 * (absmax_feature/127.)
+        self.scale_weight = 0.95 * self.scale_weight + 0.05 * (absmax_weight/127.)
+
+    
+    def frozen_scale(self):
+        self.frozen_scale = True
+    
+    def unforze_scale(self):
+        self.frozen_scale = False
     
     def forward(self, x):
+        if not self.frozen_scale and self.qmethod[0] == 'static':
+            self.updata_scale(x, self.weight)
+            
         return conv2d_int8.conv2d_int8_STE(x,
                                           self.weight,
                                           self.lut,
