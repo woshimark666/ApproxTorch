@@ -9,18 +9,20 @@ import math
 from typing import Tuple, Union
 from torch.nn.modules.utils import _pair
 
-class _conv2d_int8_STE(Function):
+class Conv2D_int8_STE(Function):
     @staticmethod
     def forward(feature, 
                 weight, 
                 lut, 
                 qmethod: Tuple[str, str, str]=('dynamic', 'tensor', 'tensor'), 
-                qparams: Tuple[torch.Tensor, torch.Tensor] | None = None, 
+                scale_feature: torch.Tensor | None = None,
+                scale_weight: torch.Tensor | None = None,
                 bias = None, 
                 stride: Union[int, Tuple[int, int]] = 1,
                 padding: Union[int, Tuple[int, int]] = 0,
-                dilation: Union[int, Tuple[int, int]] = 1
-                ):
+                dilation: Union[int, Tuple[int, int]] = 1,
+                groups: int = 1):
+        
         stride   = _pair(stride)
         padding  = _pair(padding)
         dilation = _pair(dilation)
@@ -30,7 +32,6 @@ class _conv2d_int8_STE(Function):
         OW = math.floor((W + 2*padding[1] - dilation[1]*(Kw-1) - 1)/stride[1] + 1)
         L = OH * OW
         
-        scale_feature, scale_weight = None, None
         # quantize here
         match qmethod:
             case ('dynamic', 'tensor', 'tensor'):
@@ -40,19 +41,29 @@ class _conv2d_int8_STE(Function):
                 feature, scale_feature = Q.quantize_dynamic_int8_per_tensor(feature)
                 weight, scale_weight = Q.quantize_dynamic_int8_per_channel(weight)
             case ('static', 'tensor', 'tensor'):
-                if qparams is not None:
-                    scale_feature, scale_weight = qparams
+                if scale_feature is not None and scale_weight is not None:
                     feature = Q.quantize_static_int8_per_tensor(feature, scale_feature)
                     weight = Q.quantize_static_int8_per_tensor(weight, scale_weight)
                 else:
                     raise ValueError("qparams is not provided")
             case ('static', 'tensor', 'channel'):
-                if qparams is not None:
-                    scale_feature, scale_weight = qparams
+                if scale_feature is not None and scale_weight is not None:
                     feature = Q.quantize_static_int8_per_tensor(feature, scale_feature)
                     weight = Q.quantize_static_int8_per_channel(weight, scale_weight)
                 else:
                     raise ValueError("qparams is not provided")
+            # case ('trainable', 'tensor', 'tensor'):
+            #     if scale_feature is not None and scale_weight is not None:
+            #         feature = Q.quantize_trainable_int8_per_tensor(feature, scale_feature)
+            #         weight = Q.quantize_trainable_int8_per_tensor(weight, scale_weight)
+            #     else:
+            #         raise ValueError("trainable scales are not provided")
+            # case ('trainable', 'tensor', 'channel'):
+            #     if scale_feature is not None and scale_weight is not None:
+            #         feature = Q.quantize_trainable_int8_per_tensor(feature, scale_feature)
+            #         weight = Q.quantize_trainable_int8_per_channel(weight, scale_weight)
+            #     else:
+            #         raise ValueError("trainable scales are not provided")
             case _:
                 raise ValueError(f"Invalid quantization method: {qmethod}")
             
@@ -89,12 +100,13 @@ class _conv2d_int8_STE(Function):
 
     @staticmethod
     def setup_context(ctx, input, output):
-        feature, weight, _, _, _, bias, stride, padding, dilation = input
+        feature, weight, _, qmethod, scale_feature, scale_weight, bias, stride, padding, dilation, groups = input
         ctx.save_for_backward(feature, weight)
         ctx.has_bias = bias is not None
         ctx.stride = stride
         ctx.padding = padding
         ctx.dilation = dilation
+        ctx.groups = groups
     
     @staticmethod
     def backward(ctx, upstream_grad):
@@ -107,18 +119,20 @@ class _conv2d_int8_STE(Function):
             grad_feature = torch.nn.grad.conv2d_input(feature.shape, weight, upstream_grad, stride=ctx.stride, padding=ctx.padding, dilation=ctx.dilation)
             grad_weight = torch.nn.grad.conv2d_weight(feature, weight.shape, upstream_grad, stride=ctx.stride, padding=ctx.padding, dilation=ctx.dilation)
             
-        return grad_feature, grad_weight, None, None, None, grad_bias, None, None, None
+        return grad_feature, grad_weight, None, None, None, None, grad_bias, None, None, None, None
     
 def conv2d_int8_STE(feature,
                     weight,
                     lut,
                     qmethod: Tuple[str, str, str]=('dynamic', 'tensor', 'tensor'),
-                    qparams: Tuple[torch.Tensor, torch.Tensor] | None = None,
+                    scale_feature: torch.Tensor | None = None,
+                    scale_weight: torch.Tensor | None = None,
                     bias = None,
                     stride: Union[int, Tuple[int, int]] = 1,
                     padding: Union[int, Tuple[int, int]] = 0,
-                    dilation: Union[int, Tuple[int, int]] = 1):
-    return _conv2d_int8_STE.apply(feature, weight, lut, qmethod, qparams, bias, stride, padding, dilation)
+                    dilation: Union[int, Tuple[int, int]] = 1,
+                    groups: int = 1):
+    return Conv2D_int8_STE.apply(feature, weight, lut, qmethod, scale_feature, scale_weight, bias, stride, padding, dilation, groups)
     
 
 

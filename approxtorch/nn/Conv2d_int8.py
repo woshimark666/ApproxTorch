@@ -9,16 +9,17 @@ class Conv2d_int8_STE(torch.nn.Module):
                  kernel_size: int | tuple[int, int], 
                  lut: torch.Tensor,
                  qmethod: tuple[str, str, str]=('dynamic', 'tensor', 'tensor'),
-                 qparams: tuple[torch.Tensor, torch.Tensor] | None = None,
+                 scale_feature: torch.Tensor | None = None,
+                 scale_weight: torch.Tensor | None = None,
                  bias: bool | torch.Tensor = True,
                  stride: int | tuple[int, int] = 1,
                  padding: int | tuple[int, int] = 0,
-                 dilation: int | tuple[int, int] = 1):
+                 dilation: int | tuple[int, int] = 1,
+                 groups: int = 1):
         
         super().__init__()
         self.register_buffer('lut', lut)
-        self.register_buffer('qparams', qparams)
-        self.in_chahnnels = in_channels
+        self.in_channels = in_channels
         self.out_channels = out_channels
         self.kernel_size = _pair(kernel_size)
         self.qmethod = qmethod
@@ -27,8 +28,23 @@ class Conv2d_int8_STE(torch.nn.Module):
         self.stride = stride
         self.padding = padding
         self.dilation = dilation
+        self.groups = groups
         self.weight = torch.nn.Parameter(
             torch.Tensor(out_channels, in_channels, self.kernel_size[0], self.kernel_size[1]))
+        self.forze_scale = True
+        
+        match qmethod[0]:
+            case 'static':
+                self.scale_feature = torch.nn.Parameter(scale_feature, requires_grad=False)
+                self.scale_weight = torch.nn.Parameter(scale_weight, requires_grad=False)
+            case 'dynamic':
+                self.scale_feature = None
+                self.scale_weight = None
+            case 'trainable':
+                self.scale_feature = torch.nn.Parameter(scale_feature, requires_grad=True)
+                self.scale_weight = torch.nn.Parameter(scale_weight, requires_grad=True)
+            case _:
+                raise ValueError("Invalid quantization method")
         
         if isinstance(self.bias, torch.Tensor):
             self.bias = torch.nn.Parameter(self.bias)
@@ -46,19 +62,25 @@ class Conv2d_int8_STE(torch.nn.Module):
         return f"Conv2d_int8_STE(in_channels={self.in_chahnnels}, out_channels={self.out_channels}, " \
                f"kernel_size={self.kernel_size}, qmethod={self.qmethod}, " \
                f"bias={self.has_bias}, stride={self.stride}, padding={self.padding}, " \
-               f"dilation={self.dilation})"
+               f"dilation={self.dilation}, groups={self.groups}, freeze_scales={self.freeze_scales})"
     
+    
+    def updata_scale(self, x, weight):
+        absmax_feature = torch.abs(x).max()
+        absmax_weight = torch.abs(weight).max()
     
     def forward(self, x):
         return conv2d_int8.conv2d_int8_STE(x,
                                           self.weight,
                                           self.lut,
                                           self.qmethod,
-                                          self.qparams,
+                                          self.scale_feature,
+                                          self.scale_weight,
                                           self.bias,
                                           self.stride,
                                           self.padding,
-                                          self.dilation)
+                                          self.dilation,
+                                          self.groups)
     
     
     
