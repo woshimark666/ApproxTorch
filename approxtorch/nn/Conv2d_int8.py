@@ -35,6 +35,8 @@ class Conv2d_int8_STE(torch.nn.Module):
         
         match qmethod[0]:
             case 'static':
+                # self.register_buffer('scale_feature', torch.randn(()))
+                # self.register_buffer('scale_weight', torch.randn((out_channels)))
                 self.scale_feature = torch.nn.Parameter(scale_feature, requires_grad=False)
                 self.scale_weight = torch.nn.Parameter(scale_weight, requires_grad=False)
             case 'dynamic':
@@ -68,14 +70,17 @@ class Conv2d_int8_STE(torch.nn.Module):
     def updata_scale(self, x, weight):
         absmax_feature = torch.abs(x).max()
         absmax_weight = torch.abs(weight).max()
-        self.scale_feature = 0.95 * self.scale_feature + 0.05 * (absmax_feature/127.)
-        self.scale_weight = 0.95 * self.scale_weight + 0.05 * (absmax_weight/127.)
+        new_scale_feature = 0.95 * self.scale_feature + 0.05 * (absmax_feature/127.)
+        new_scale_weight = 0.95 * self.scale_weight + 0.05 * (absmax_weight/127.)
 
+        with torch.no_grad():
+            self.scale_feature.copy_(new_scale_feature)
+            self.scale_weight.copy_(new_scale_weight)
     
-    def frozen_scale(self):
+    def freeze_scale(self):
         self.frozen_scale = True
     
-    def unforze_scale(self):
+    def unfreeze_scale(self):
         self.frozen_scale = False
     
     def forward(self, x):

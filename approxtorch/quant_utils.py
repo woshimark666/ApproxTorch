@@ -99,7 +99,7 @@ def forze_scale(model):
     
     for name, module in model.named_modules():
         if isinstance(module, Conv2d_int8_STE):
-            module.frozen_scale()
+            module.freeze_scale()
 
 def unforze_scale(model):
     """
@@ -107,4 +107,4 @@ def unforze_scale(model):
     """
     for name, module in model.named_modules():
         if isinstance(module, Conv2d_int8_STE):
-            module.unforze_scale()
+            module.unfreeze_scale()
