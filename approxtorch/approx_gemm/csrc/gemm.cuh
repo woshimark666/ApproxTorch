@@ -491,11 +491,10 @@ torch::Tensor naive_gemm_int8(
     const torch::Tensor& lut
 );
 
-std::tuple<torch::Tensor, torch::Tensor> gemm_int8_gradient(
-    torch::Tensor& A,
-    torch::Tensor& B,
-    torch::Tensor& upstream_gradient,
-    const torch::Tensor& gradient_lut
+std::tuple<torch::Tensor, torch::Tensor> 
+gemm_int8_gradient( 
+    torch::Tensor& A, torch::Tensor& B, 
+    torch::Tensor& grad_A_lut, torch::Tensor& grad_B_lut
 );
 
 torch::Tensor gemm_uint8(

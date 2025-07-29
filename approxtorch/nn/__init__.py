@@ -8,9 +8,7 @@
 
 
 
-from .Conv2d_int8 import Conv2d_int8_STE
+from .Conv2d_int8 import Conv2d_int8_STE, Conv2d_int8_EST
 from .Linear_int8 import Linear_int8_STE
 from .Conv2d_uint8 import Conv2d_uint8_STE
 from .Linear_uint8 import Linear_uint8_STE
-
-__all__ = ['Conv2d_int8_STE', 'Linear_int8_STE', 'Conv2d_uint8_STE', 'Linear_uint8_STE']
