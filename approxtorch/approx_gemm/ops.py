@@ -37,3 +37,7 @@ def gemm_int8_gradient(A: Tensor, B: Tensor, grad_A_lut: Tensor, grad_B_lut: Ten
 
 def gemm_uint8(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
     return torch.ops.approxtorch.gemm_uint8.default(A, B, lut)
+
+
+def depthwise_gemm_int8(X: Tensor, W: Tensor, lut: Tensor) -> Tensor:
+    return torch.ops.approxtorch.depthwise_gemm_int8.default(X, W, lut)

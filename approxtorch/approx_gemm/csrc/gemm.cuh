@@ -502,5 +502,15 @@ torch::Tensor gemm_uint8(
     torch::Tensor& B,
     const torch::Tensor& lut);
 
+// depthwise gemm for depthwise conv
+torch::Tensor depthwise_gemm_int8(
+    torch::Tensor& X,
+    torch::Tensor& W,
+    torch::Tensor& lut
+);
+
+
 }
+
+
 
