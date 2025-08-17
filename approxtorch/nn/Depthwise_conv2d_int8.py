@@ -2,7 +2,7 @@ import torch
 from . import depthwise_conv2d_int8
 from torch.nn.modules.utils import _pair
 # define Module class for depthwise conv2d 
-class Depthwise_conv2d_STE(torch.nn.Module):
+class Depthwise_conv2d_int8_STE(torch.nn.Module):
     def __init__(self, 
                  in_channels,
                  out_channels,
@@ -99,7 +99,7 @@ class Depthwise_conv2d_STE(torch.nn.Module):
         
         
 # class for depthwise conv2d with estimated gradient.
-class Depthwise_conv2d_EST(torch.nn.Module):
+class Depthwise_conv2d_int8_EST(torch.nn.Module):
     def __init__(self, 
                  in_channels,
                  out_channels,
