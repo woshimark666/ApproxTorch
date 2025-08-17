@@ -113,7 +113,7 @@ class Conv2DInt8STE(Function):
         # load the saved tensors
         feature, weight = ctx.saved_tensors
         grad_feature, grad_weight, grad_bias = None, None, None
-        if ctx.has_bias and ctx.needs_input_grad[5]:
+        if ctx.has_bias and ctx.needs_input_grad[6]:
             grad_bias = upstream_grad.sum(dim=(0, 2, 3))
         if ctx.needs_input_grad[0] and ctx.needs_input_grad[1]:
             grad_feature = torch.nn.grad.conv2d_input(feature.shape, weight, upstream_grad, stride=ctx.stride, padding=ctx.padding, dilation=ctx.dilation)
@@ -229,14 +229,14 @@ class Conv2DInt8EST(Function):
         # feature is (B*L, CKK)
         # weight is (CKK, O)
         # upstream_grad is (B, O, OH, OW)
-        # grad_lut is (255*255, 2)
+        # grad_lut shape (256*256, 2)
         (B, C, H, W) = ctx.feature_shape
         (B, O, OH, OW) = ctx.output_shape
         (_, _, Kh, Kw) = ctx.weight_shape
         L = OH * OW
         grad_feature, grad_weight, grad_bias = None, None, None
         #  if bias gradient is needed
-        if ctx.has_bias and ctx.needs_input_grad[4]:
+        if ctx.has_bias and ctx.needs_input_grad[7]:
             grad_bias = upstream_grad.sum(dim=(0, 2, 3))
             
         if ctx.needs_input_grad[0] and ctx.needs_input_grad[1]:

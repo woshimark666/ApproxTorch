@@ -509,6 +509,11 @@ torch::Tensor depthwise_gemm_int8(
     torch::Tensor& lut
 );
 
+std::tuple<torch::Tensor, torch::Tensor> 
+depthwise_gemm_int8_gradient( 
+    torch::Tensor& X, torch::Tensor& W, 
+    torch::Tensor& grad_X_lut, torch::Tensor& grad_W_lut
+);
 
 }
 
