@@ -1,8 +1,8 @@
 import torch
-from .nn import Conv2d_int8_STE
+from .nn import Conv2d_int8_STE, Conv2d_int8_EST, Depthwise_conv2d_int8_EST, Depthwise_conv2d_int8_STE
 import copy
 
-def collect_absmax(model, dataloader, num_batches=None):
+def collect_absmax(model, dataloader, qmethod, num_batches=None):
     model.eval()
     activation_absmax = {}
     weight_absmax = {}
@@ -18,7 +18,8 @@ def collect_absmax(model, dataloader, num_batches=None):
                 activation_absmax[name] = max(activation_absmax[name], max_abs)
         return hook
     
-    # Register hooks for all Conv2d and Linear layers
+    # Register hooks for all Conv2d except the first one
+    # collect the absmax for activation
     first_conv_found = False
     for name, module in model.named_modules():
         if isinstance(module, torch.nn.Conv2d):
@@ -31,7 +32,7 @@ def collect_absmax(model, dataloader, num_batches=None):
     # Process data
     with torch.no_grad():
         for i, (inputs, _) in enumerate(dataloader):
-            if num_batches is not None and i >= num_batches:
+            if num_batches is not None and i > num_batches:
                 break
             inputs = inputs.cuda()
             model(inputs)
@@ -40,29 +41,36 @@ def collect_absmax(model, dataloader, num_batches=None):
     for hook in hooks:
         hook.remove()
     
-    
-    first_linear_found = False
+    # collect the absmax for weight
+    first_conv_found = False
     for name, module in model.named_modules():
         if isinstance(module, torch.nn.Conv2d):
-            if not first_linear_found:
-                # Skip the first Linear layer
-                first_linear_found = True
+            if not first_conv_found:
+                # Skip the first Conv2d layer
+                first_conv_found = True
                 continue
             weight = module.weight.data
-            weight_reshaped = weight.view(weight.size(0), -1)
-            maxabs = weight_reshaped.abs().max(dim=1)[0].cpu()
-            weight_absmax[name] = maxabs
+            
+            if qmethod[2] == 'channel':
+                weight_reshaped = weight.view(weight.size(0), -1)
+                maxabs = weight_reshaped.abs().max(dim=1)[0].cpu()
+                weight_absmax[name] = maxabs
+                
+            elif qmethod[2] == 'tensor':
+                weight_absmax[name] = weight.abs().max().cpu()
+            else:
+                raise ValueError(f"Invalid qmethod: {qmethod}")
 
     return activation_absmax, weight_absmax
 
 
-def calibrate_int8(model, train_loader, data_precentage, save_path=None):
-        
+def calibrate_int8(model, train_loader, data_precentage, qmethod=('static', 'tensor', 'tensor'), save_path=None):
+    
     # Calculate number of batches to process based on percentage
     num_batches = int(len(train_loader) * data_precentage) if data_precentage < 1.0 else None
     
     # Collect min/max values
-    activation_absmax, weight_absmax = collect_absmax(model, train_loader, num_batches)
+    activation_absmax, weight_absmax = collect_absmax(model, train_loader, qmethod, num_batches)
 
     first_conv_found = False
     for name, module in model.named_modules():
@@ -91,14 +99,14 @@ def calibrate_int8(model, train_loader, data_precentage, save_path=None):
         print(f"State dict with scales saved to {save_path}")
 
 
-
+all_conv = (Conv2d_int8_STE, Conv2d_int8_EST, Depthwise_conv2d_int8_EST, Depthwise_conv2d_int8_STE)
 def forze_scale(model):
     """
     input the model and forze all the scale parameters
     """
     
     for name, module in model.named_modules():
-        if isinstance(module, Conv2d_int8_STE):
+        if isinstance(module, all_conv):
             module.freeze_scale()
 
 def unforze_scale(model):
@@ -106,5 +114,5 @@ def unforze_scale(model):
     input the model and unforze all the scale parameters
     """
     for name, module in model.named_modules():
-        if isinstance(module, Conv2d_int8_STE):
+        if isinstance(module, all_conv):
             module.unfreeze_scale()
