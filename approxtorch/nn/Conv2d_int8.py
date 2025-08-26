@@ -106,7 +106,7 @@ class Conv2d_int8_EST(torch.nn.Module):
                  out_channels: int,
                  kernel_size: int | tuple[int, int], 
                  lut: torch.Tensor,
-                 gradient_lut: torch.Tensor,
+                 gradient_lut: tuple[torch.Tensor, torch.Tensor],
                  qmethod: tuple[str, str, str]=('dynamic', 'tensor', 'tensor'),
                  scale_feature: torch.Tensor | None = None,
                  scale_weight: torch.Tensor | None = None,
@@ -118,7 +118,8 @@ class Conv2d_int8_EST(torch.nn.Module):
         
         super().__init__()
         self.register_buffer('lut', lut)
-        self.register_buffer('gradient_lut', gradient_lut)
+        self.register_buffer('gradient_lut_dx', gradient_lut[0])
+        self.register_buffer('gradient_lut_dy', gradient_lut[1])
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.kernel_size = _pair(kernel_size)
@@ -161,7 +162,7 @@ class Conv2d_int8_EST(torch.nn.Module):
             raise ValueError("Invalid bias type")
     
     def __repr__(self):
-        return f"Conv2d_int8_STE(in_channels={self.in_channels}, out_channels={self.out_channels}, " \
+        return f"Conv2d_int8_EST(in_channels={self.in_channels}, out_channels={self.out_channels}, " \
                f"kernel_size={self.kernel_size}, qmethod={self.qmethod}, " \
                f"bias={self.has_bias}, stride={self.stride}, padding={self.padding}, " \
                f"dilation={self.dilation}, groups={self.groups}, freeze_scales={self.frozen_scale})"
@@ -170,8 +171,12 @@ class Conv2d_int8_EST(torch.nn.Module):
     def updata_scale(self, x, weight):
         absmax_feature = torch.abs(x).max()
         absmax_weight = torch.abs(weight).max()
-        new_scale_feature = 0.95 * self.scale_feature + 0.05 * (absmax_feature/127.)
-        new_scale_weight = 0.95 * self.scale_weight + 0.05 * (absmax_weight/127.)
+        old_absmax_feature = self.scale_feature * 127.
+        old_absmax_weight = self.scale_weight * 127.
+        new_absmax_feature = 0.95 * old_absmax_feature + 0.05 * absmax_feature
+        new_absmax_weight = 0.95 * old_absmax_weight + 0.05 * absmax_weight
+        new_scale_feature = new_absmax_feature / 127.
+        new_scale_weight = new_absmax_weight / 127.
 
         with torch.no_grad():
             self.scale_feature.copy_(new_scale_feature)
@@ -190,7 +195,7 @@ class Conv2d_int8_EST(torch.nn.Module):
         return conv2d_int8.conv2d_int8_EST(x,
                                           self.weight,
                                           self.lut,
-                                          self.gradient_lut,
+                                          (self.gradient_lut_dx, self.gradient_lut_dy),
                                           self.qmethod,
                                           self.scale_feature,
                                           self.scale_weight,

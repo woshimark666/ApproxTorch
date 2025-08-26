@@ -8,8 +8,8 @@ from . import im2col
 import math
 from typing import Tuple, Union
 from torch.nn.modules.utils import _pair
-
-class Conv2DInt8STE(Function):
+    
+class _conv2d_int8_STE(Function):
     @staticmethod
     def forward(feature, 
                 weight, 
@@ -118,7 +118,7 @@ class Conv2DInt8STE(Function):
         if ctx.needs_input_grad[0] and ctx.needs_input_grad[1]:
             grad_feature = torch.nn.grad.conv2d_input(feature.shape, weight, upstream_grad, stride=ctx.stride, padding=ctx.padding, dilation=ctx.dilation)
             grad_weight = torch.nn.grad.conv2d_weight(feature, weight.shape, upstream_grad, stride=ctx.stride, padding=ctx.padding, dilation=ctx.dilation)
-            
+        
         return grad_feature, grad_weight, None, None, None, None, grad_bias, None, None, None, None
     
 def conv2d_int8_STE(feature,
@@ -132,18 +132,18 @@ def conv2d_int8_STE(feature,
                     padding: Union[int, Tuple[int, int]] = 0,
                     dilation: Union[int, Tuple[int, int]] = 1,
                     groups: int = 1):
-    return Conv2DInt8STE.apply(feature, weight, lut, qmethod, scale_feature, scale_weight, bias, stride, padding, dilation, groups)
+    return _conv2d_int8_STE.apply(feature, weight, lut, qmethod, scale_feature, scale_weight, bias, stride, padding, dilation, groups)
     
 
 
 # conv2d use estimated gradient
-class Conv2DInt8EST(Function):
+class _conv2d_int8_EST(Function):
     @staticmethod
     def forward(ctx, 
                 feature: torch.Tensor, 
                 weight: torch.Tensor, 
                 lut: torch.Tensor, 
-                gradient_lut: torch.Tensor,
+                gradient_lut: tuple[torch.Tensor, torch.Tensor],
                 qmethod: tuple[str, str, str] = ('dynamic', 'tensor', 'channel'),
                 scale_feature: torch.Tensor | None = None, 
                 scale_weight: torch.Tensor | None = None,
@@ -164,8 +164,8 @@ class Conv2DInt8EST(Function):
         ctx.has_bias = bias is not None
         ctx.feature_shape = feature.shape
         ctx.weight_shape = weight.shape
-        OH = math.floor((H + 2*padding - dilation*(Kh-1) - 1)/stride + 1)
-        OW = math.floor((W + 2*padding - dilation*(Kw-1) - 1)/stride + 1)
+        OH = math.floor((H + 2*padding[0] - dilation[0]*(Kh-1) - 1)/stride[0] + 1)
+        OW = math.floor((W + 2*padding[1] - dilation[1]*(Kw-1) - 1)/stride[1] + 1)
         L = OH * OW
         ctx.output_shape = (B, O, OH, OW)
         match qmethod:
@@ -195,8 +195,7 @@ class Conv2DInt8EST(Function):
         weight = im2col.conv_weight(weight).to(torch.int8)
 
         # save for backward 
-        ctx.save_for_backward(feature, weight, scale_feature, scale_weight, gradient_lut)
-        # weight is (CKK, O) and int8 type
+        ctx.save_for_backward(feature, weight, gradient_lut[0], gradient_lut[1], scale_feature, scale_weight)
         output = ap.ops.gemm_int8(feature, weight, lut).to(torch.float)  # (B*L, O)
         
         # rearrange tensor
@@ -223,47 +222,54 @@ class Conv2DInt8EST(Function):
     
     @staticmethod
     def backward(ctx, upstream_grad):
-        mat_feature, mat_weight, scale_feature, scale_weight, grad_lut = ctx.saved_tensors
+        mat_feature, mat_weight, grad_lut_dx, grad_lut_dy, s_feature, s_weight = ctx.saved_tensors
         # 要把 grad_lut 拆成两个，一个是dx, 一个是dy
-        grad_lut_dx, grad_lut_dy = torch.unbind(grad_lut, dim=1)
         # feature is (B*L, CKK)
         # weight is (CKK, O)
         # upstream_grad is (B, O, OH, OW)
-        # grad_lut shape (256*256, 2)
+        # grad_lut shape (256, 2)
         (B, C, H, W) = ctx.feature_shape
         (B, O, OH, OW) = ctx.output_shape
         (_, _, Kh, Kw) = ctx.weight_shape
         L = OH * OW
         grad_feature, grad_weight, grad_bias = None, None, None
         #  if bias gradient is needed
-        if ctx.has_bias and ctx.needs_input_grad[7]:
+        if ctx.has_bias and ctx.needs_input_grad[8]:
             grad_bias = upstream_grad.sum(dim=(0, 2, 3))
             
         if ctx.needs_input_grad[0] and ctx.needs_input_grad[1]:
             upstream_grad = upstream_grad.view(B, O, L).transpose(1,2).contiguous().view(B*L, O) # (BL, O)
             grad_feature, grad_weight = ap.ops.gemm_int8_gradient(mat_feature, mat_weight, grad_lut_dx, grad_lut_dy)
+
             # grad_feature is for computing feature gradient, shape is (CKK, O)
             # grad_weight is for computing weight gradient, shape is (BL, CKK)
             # upstream_grad shape is changed to (BL, O)
+            
             grad_feature = upstream_grad.matmul(grad_feature.t()) # output shape (BL, CKK)
+
+            
             grad_feature = grad_feature.view(B, L, C*Kh*Kw).transpose(1, 2).contiguous()
             grad_feature =  torch.nn.functional.fold(grad_feature, (H, W), 
                         kernel_size=(Kh, Kw), padding=ctx.padding, 
-                        stride=ctx.stride, dilation=ctx.dilation) * scale_weight
-            # here the grad_feature shape is (B, C, H, W)
-
-
-            grad_weight = grad_weight.t().matmul(upstream_grad) # output shape (CKK, O)
-            grad_weight = grad_weight.transpose(0, 1).contiguous().view(O, C, Kh, Kw) * scale_feature
+                        stride=ctx.stride, dilation=ctx.dilation) * s_weight
+            
 
             
+            
+            # here the grad_feature shape is (B, C, H, W)
+
+            # grad_weight shape is (BL, CKK)
+            grad_weight = grad_weight * s_feature
+            grad_weight = grad_weight.t().matmul(upstream_grad) # output shape (CKK, O)          
+            grad_weight = grad_weight.transpose(0, 1).contiguous().view(O, C, Kh, Kw)
+
         return grad_feature, grad_weight, None, None, None, None, None, grad_bias, None, None, None, None
     
 
 def conv2d_int8_EST(feature,
                     weight,
                     lut,
-                    gradient_lut,
+                    gradient_lut: tuple[torch.Tensor, torch.Tensor],
                     qmethod: tuple[str, str, str] = ('dynamic', 'tensor', 'channel'),
                     scale_feature: torch.Tensor | None = None,
                     scale_weight: torch.Tensor | None = None,
@@ -272,6 +278,6 @@ def conv2d_int8_EST(feature,
                     padding: Union[int, Tuple[int, int]] = 0,
                     dilation: Union[int, Tuple[int, int]] = 1,
                     groups: int = 1):
-    return Conv2DInt8EST.apply(feature, weight, 
+    return _conv2d_int8_EST.apply(feature, weight, 
                                lut, gradient_lut, qmethod, scale_feature, scale_weight, bias, stride, padding, dilation, groups)
     

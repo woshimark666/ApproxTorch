@@ -105,7 +105,7 @@ class Depthwise_conv2d_int8_EST(torch.nn.Module):
                  out_channels,
                  kernel_size: int | tuple[int, int], 
                  lut: torch.Tensor,
-                 gradient_lut: torch.Tensor,
+                 gradient_lut: tuple[torch.Tensor, torch.Tensor],
                  qmethod: tuple[str, str, str]=('dynamic', 'tensor', 'tensor'),
                  scale_feature: torch.Tensor | None = None,
                  scale_weight: torch.Tensor | None = None,
@@ -117,7 +117,8 @@ class Depthwise_conv2d_int8_EST(torch.nn.Module):
         
         super().__init__()
         self.register_buffer('lut', lut)
-        self.register_buffer('gradient_lut', gradient_lut)
+        self.register_buffer('gradient_lut_dx', gradient_lut[0])
+        self.register_buffer('gradient_lut_dy', gradient_lut[1])
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.kernel_size = _pair(kernel_size)
@@ -187,7 +188,7 @@ class Depthwise_conv2d_int8_EST(torch.nn.Module):
         return depthwise_conv2d_int8.depthwise_conv2d_int8_EST(x,
                                                      self.weight,
                                                      self.lut,
-                                                     self.gradient_lut,
+                                                     (self.gradient_lut_dx, self.gradient_lut_dy),
                                                      self.qmethod,
                                                      self.scale_feature,
                                                      self.scale_weight,

@@ -154,7 +154,7 @@ class _depthwise_conv2d_int8_EST(Function):
                 feature, 
                 weight,
                 lut, 
-                gradient_lut,
+                gradient_lut: tuple[torch.Tensor, torch.Tensor],
                 qmethod: tuple[str, str, str]=('dynamic', 'tensor', 'tensor'), 
                 scale_feature: torch.Tensor | None = None,
                 scale_weight: torch.Tensor | None = None,
@@ -215,7 +215,7 @@ class _depthwise_conv2d_int8_EST(Function):
         weight = weight.view(C, 1, KH*KW).to(torch.int8)
         # feature shape (B, C, KK, L)
         # weight shape (C, 1, KK)
-        ctx.save_for_backward(feature, weight, scale_feature, scale_weight, gradient_lut)
+        ctx.save_for_backward(feature, weight, scale_feature, scale_weight, gradient_lut[0], gradient_lut[1])
 
         
         # 3. approximate depthwise gemm
@@ -239,15 +239,12 @@ class _depthwise_conv2d_int8_EST(Function):
     
     @staticmethod
     def backward(ctx: Any, upstream_grad):
-        feature, weight, scale_feature, scale_weight, grad_lut = ctx.saved_tensors
+        feature, weight, scale_feature, scale_weight, grad_lut_dx, grad_lut_dy = ctx.saved_tensors
         
         (B, _, H, W) = ctx.feature_shape
         (C, _, KH, KW) = ctx.weight_shape
         (_, _, OH, OW) = ctx.output_shape
         
-        
-        # 把grad_lut拆开，一个是dx, 一个是dy
-        grad_lut_feature, grad_lut_weight = torch.unbind(grad_lut, dim=1)
         
         grad_feature, grad_weight, grad_bias = None, None, None
         if ctx.has_bias and ctx.needs_input_grad[7]:
@@ -259,8 +256,8 @@ class _depthwise_conv2d_int8_EST(Function):
             
             # prepare grad_X using weight, grad_lut_feature
             grad_feature, grad_weight = at.approx_gemm.ops.depthwise_gemm_int8_gradient(feature, weight,
-                                                                grad_lut_feature,
-                                                                grad_lut_weight)
+                                                                grad_lut_dx,
+                                                                grad_lut_dy)
             grad_feature = grad_feature.view(C, KH*KW)
             # grad_feature shape (C, 1, KK), dytpe float
             # grad_weight shape (B, C, KK, L), type float
@@ -289,7 +286,7 @@ class _depthwise_conv2d_int8_EST(Function):
 def depthwise_conv2d_int8_EST(feature,
                               weight,
                               lut,
-                              gradient_lut,
+                              gradient_lut: tuple[torch.Tensor, torch.Tensor],
                               qmethod: tuple[str, str, str]=('dynamic', 'tensor', 'tensor'),
                               scale_feature: torch.Tensor | None = None,
                               scale_weight: torch.Tensor | None = None,
