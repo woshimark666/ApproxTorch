@@ -245,13 +245,13 @@ class _conv2d_int8_EST(Function):
             # grad_weight is for computing weight gradient, shape is (BL, CKK)
             # upstream_grad shape is changed to (BL, O)
             
-            grad_feature = upstream_grad.matmul(grad_feature.t()) # output shape (BL, CKK)
+            grad_feature = (upstream_grad * s_weight.view(1, -1)).matmul(grad_feature.t()) # output shape (BL, CKK)
 
             
             grad_feature = grad_feature.view(B, L, C*Kh*Kw).transpose(1, 2).contiguous()
             grad_feature =  torch.nn.functional.fold(grad_feature, (H, W), 
                         kernel_size=(Kh, Kw), padding=ctx.padding, 
-                        stride=ctx.stride, dilation=ctx.dilation) * s_weight.view(1, -1, 1, 1)
+                        stride=ctx.stride, dilation=ctx.dilation)
             
 
             
