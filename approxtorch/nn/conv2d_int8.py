@@ -251,7 +251,9 @@ class _conv2d_int8_EST(Function):
             grad_feature = grad_feature.view(B, L, C*Kh*Kw).transpose(1, 2).contiguous()
             grad_feature =  torch.nn.functional.fold(grad_feature, (H, W), 
                         kernel_size=(Kh, Kw), padding=ctx.padding, 
-                        stride=ctx.stride, dilation=ctx.dilation) * s_weight
+                        stride=ctx.stride, dilation=ctx.dilation) 
+            # grad feature shape is (B, O, H, W)
+            grad_feature = grad_feature * s_feature.view(1, -1, 1, 1)
             
 
             
