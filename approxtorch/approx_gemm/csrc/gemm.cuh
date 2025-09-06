@@ -515,6 +515,11 @@ depthwise_gemm_int8_gradient(
     torch::Tensor& grad_X_lut, torch::Tensor& grad_W_lut
 );
 
+torch::Tensor gemm_int4(
+    torch::Tensor& A,
+    torch::Tensor& B,
+    const torch::Tensor& lut);
+
 }
 
 

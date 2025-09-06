@@ -105,6 +105,22 @@ def quantize_static_uint8_per_channel(x: torch.Tensor, scale: torch.Tensor, zero
         x = torch.clamp(x, 0, 255)
         return x
 
+def quantize_dynamic_int4_per_tensor(x: torch.Tensor, dim: tuple = (0,1,2,3)):
+    """ int4 quantization at tensor level
+
+    Args:
+        x (torch.Tensor): input tensor
+
+    Returns:
+        tuple: quantized tensor and scale
+    """
+    with torch.no_grad():
+        abs_max = torch.amax(torch.abs(x), dim=dim, keepdim=False)
+        scale = abs_max / 7.
+        x = torch.round(x / scale)
+        x = torch.clamp(x, -8, 7)
+        return x, scale
+
 class TrainableQuantizeInt8PerTensor(torch.autograd.Function):
     """
     可训练的int8量化函数，使用STE (Straight-Through Estimator)
