@@ -270,7 +270,7 @@ class Conv2d_int8_custom(torch.nn.Module):
         return f"Conv2d_int8_custom(in_channels={self.in_channels}, out_channels={self.out_channels}, " \
                f"kernel_size={self.kernel_size}, qmethod={self.qmethod}, " \
                f"bias={self.has_bias}, stride={self.stride}, padding={self.padding}, " \
-               f"dilation={self.dilation}, groups={self.groups}, freeze_scales={self.frozen_scale})"
+               f"dilation={self.dilation}, groups={self.groups}, freeze_scales={self.frozen_scale}, coefficients={self.coefficients})"
     
     
     def updata_scale(self, x, weight):
