@@ -1,16 +1,16 @@
 import torch
 import torch.nn as nn
 from approxtorch.nn import Conv2d_int8_STE, Linear_int8_STE, Conv2d_int8_EST, \
-Conv2d_uint8_STE, Linear_uint8_STE, Depthwise_conv2d_int8_EST, Depthwise_conv2d_int8_STE
+Conv2d_uint8_STE, Linear_uint8_STE, Depthwise_conv2d_int8_EST, Depthwise_conv2d_int8_STE, Conv2d_int8_custom
 from typing import Literal
 
 # this function convert the model into approximate model
-# 暂时我只写了转换为dynamic quant的转换公式，static 还要考虑一下
 def convert_model(model, 
                   lut,
                   qtype: Literal['int8', 'uint8'] = 'int8',
                   qmethod: tuple[str, str, str] = ('dynamic', 'tensor', 'tensor'),
-                  gradient: Literal['ste', 'est'] = 'ste',
+                  gradient: Literal['ste', 'est', 'custom'] = 'ste',
+                  coefficients: tuple = (0.0, 0.0, 0.0, 0.0, 0.0),
                   gradient_lut=None, 
                   conv_only=True,
                   ignore_first_conv=True
@@ -73,6 +73,7 @@ def convert_model(model,
                     case _:
                         raise ValueError("Invalid qtype or gradient type")     
             else:
+                # this is a Normal Conv2d
                 match (qtype, gradient):
                     case ('int8', 'ste'):
                         new_module = Conv2d_int8_STE(
@@ -84,6 +85,10 @@ def convert_model(model,
                             in_channels, out_channels, kernel_size,
                             lut, gradient_lut, qmethod, scale_feature, scale_weight,
                             bias, stride, padding, dilation, groups)
+                    case ('int8', 'custom'):
+                        new_module = Conv2d_int8_custom(in_channels, out_channels, kernel_size, 
+                                                        lut, qmethod, coefficients, scale_feature, scale_weight,
+                                                        bias, stride, padding, dilation, groups)
                     case _:
                         raise ValueError("Invalid qtype or gradient type")
             
