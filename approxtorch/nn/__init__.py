@@ -9,7 +9,7 @@
 
 # depthwise conv2d and conv2d 
 from .Conv2d_int8 import Conv2d_int8_STE, Conv2d_int8_EST
-from .conv2d_int8 import conv2d_int8_EST, conv2d_int8_STE
+from .conv2d_int8 import conv2d_int8_EST, conv2d_int8_STE, conv2d_int8_custom
 from .Depthwise_conv2d_int8 import Depthwise_conv2d_int8_EST, Depthwise_conv2d_int8_STE
 
 
