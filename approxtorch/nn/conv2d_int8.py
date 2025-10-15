@@ -413,7 +413,7 @@ class _conv2d_int8_custom(Function):
 
         # ---- 对输入的梯度：sum_co G * (p10 + 2*p20*X + p11*W) ----
         gf = p10 + 2.0 * p20 * X_e + p11 * W_e             # (N, Cout, Cik, L)
-        dX_unf = (G[:, :, None, :] * gf).mean(dim=1)        # (N, Cik, L)
+        dX_unf = (G[:, :, None, :] * gf).sum(dim=1)        # (N, Cik, L)
 
         # fold 回输入尺寸
         grad_feature = F.fold(dX_unf, output_size=(H, W),
@@ -422,7 +422,7 @@ class _conv2d_int8_custom(Function):
 
         # ---- 对权重的梯度：sum_{n,l} G * (p01 + 2*p02*W + p11*X) ----
         gw = p01 + 2.0 * p02 * W_e + p11 * X_e             # (N, Cout, Cik, L)
-        dW_mat = (G[:, :, None, :] * gw).mean(dim=(0, 3))   # (Cout, Cik)
+        dW_mat = (G[:, :, None, :] * gw).sum(dim=(0, 3))   # (Cout, Cik)
         grad_weight = dW_mat.view_as(weight)
         
            
