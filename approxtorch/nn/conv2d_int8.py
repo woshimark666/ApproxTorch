@@ -384,6 +384,51 @@ class _conv2d_int8_custom(Function):
         ctx.dilation = dilation
         ctx.groups = groups
         
+    # @staticmethod
+    # def backward(ctx, upstream_grad):
+    #     x, weight = ctx.saved_tensors
+    #     (B, C, H, W) = x.shape
+    #     (O, C, Kh, Kw) = weight.shape
+    #     p10, p01, p20, p02, p11 = ctx.coefficients
+    #     stride = ctx.stride
+    #     padding = ctx.padding
+    #     dilation = ctx.dilation
+    #     groups = ctx.groups
+        
+    #     grad_feature, grad_weight, grad_bias = None, None, None
+    #     if ctx.has_bias and ctx.needs_input_grad[7]:
+    #         grad_bias = upstream_grad.sum(dim=(0, 2, 3))
+
+    #     # unfold 输入窗口: X_unf[N, Cin*Kh*Kw, L], L=H_out*W_out
+    #     X_unf = F.unfold(x, (Kh, Kw), dilation=dilation, padding=padding, stride=stride)
+    #     L = X_unf.shape[-1]
+    #     # weight 展平: W_mat[Cout, Cin*Kh*Kw]
+    #     W_mat = weight.view(O, -1)
+    #     # grad_out 展平: G[N, Cout, L]
+    #     G = upstream_grad.reshape(B, O, -1)
+
+    #     # 方便广播的形状
+    #     X_e = X_unf[:, None, :, :]            # (N, 1,   Cik, L)
+    #     W_e = W_mat[None, :, :, None]         # (1,  Cout, Cik, 1)
+
+    #     # ---- 对输入的梯度：sum_co G * (p10 + 2*p20*X + p11*W) ----
+    #     gf = p10 + 2.0 * p20 * X_e + p11 * W_e             # (N, Cout, Cik, L)
+    #     dX_unf = (G[:, :, None, :] * gf).sum(dim=1)        # (N, Cik, L)
+
+    #     # fold 回输入尺寸
+    #     grad_feature = F.fold(dX_unf, output_size=(H, W),
+    #                       kernel_size=(Kh, Kw),
+    #                       dilation=dilation, padding=padding, stride=stride)
+
+    #     # ---- 对权重的梯度：sum_{n,l} G * (p01 + 2*p02*W + p11*X) ----
+    #     gw = p01 + 2.0 * p02 * W_e + p11 * X_e             # (N, Cout, Cik, L)
+    #     dW_mat = (G[:, :, None, :] * gw).sum(dim=(0, 3))   # (Cout, Cik)
+    #     grad_weight = dW_mat.view_as(weight)
+        
+           
+    #     return grad_feature, grad_weight, None, None, None, None, None, grad_bias, None, None, None, None
+
+    
     @staticmethod
     def backward(ctx, upstream_grad):
         x, weight = ctx.saved_tensors
@@ -399,35 +444,36 @@ class _conv2d_int8_custom(Function):
         if ctx.has_bias and ctx.needs_input_grad[7]:
             grad_bias = upstream_grad.sum(dim=(0, 2, 3))
 
-        # unfold 输入窗口: X_unf[N, Cin*Kh*Kw, L], L=H_out*W_out
-        X_unf = F.unfold(x, (Kh, Kw), dilation=dilation, padding=padding, stride=stride)
-        L = X_unf.shape[-1]
-        # weight 展平: W_mat[Cout, Cin*Kh*Kw]
-        W_mat = weight.view(O, -1)
-        # grad_out 展平: G[N, Cout, L]
-        G = upstream_grad.reshape(B, O, -1)
-
-        # 方便广播的形状
-        X_e = X_unf[:, None, :, :]            # (N, 1,   Cik, L)
-        W_e = W_mat[None, :, :, None]         # (1,  Cout, Cik, 1)
-
-        # ---- 对输入的梯度：sum_co G * (p10 + 2*p20*X + p11*W) ----
-        gf = p10 + 2.0 * p20 * X_e + p11 * W_e             # (N, Cout, Cik, L)
-        dX_unf = (G[:, :, None, :] * gf).sum(dim=1)        # (N, Cik, L)
-
-        # fold 回输入尺寸
-        grad_feature = F.fold(dX_unf, output_size=(H, W),
-                          kernel_size=(Kh, Kw),
-                          dilation=dilation, padding=padding, stride=stride)
-
-        # ---- 对权重的梯度：sum_{n,l} G * (p01 + 2*p02*W + p11*X) ----
-        gw = p01 + 2.0 * p02 * W_e + p11 * X_e             # (N, Cout, Cik, L)
-        dW_mat = (G[:, :, None, :] * gw).sum(dim=(0, 3))   # (Cout, Cik)
-        grad_weight = dW_mat.view_as(weight)
+        x = F.unfold(x, (Kh, Kw), dilation=dilation, padding=padding, stride=stride)
+        L = x.shape[2]
+        x = x.transpose(1, 2).contiguous().view(B*L, C*Kh*Kw) # x shape is (B*L,CKK)
+        weight = weight.view(O, -1) # weight shape is (O,CKK)
         
-           
-        return grad_feature, grad_weight, None, None, None, None, None, grad_bias, None, None, None, None
+        
+        # upstream_grad (B,O,OH,OW) -> (B*L, O)
+        upstream_grad = upstream_grad.view(B, O, -1).transpose(1, 2).contiguous().view(B*L, O)
+        s_row = upstream_grad.sum(dim=1, keepdim=True)  # (B*L, 1)
+        s_col = upstream_grad.sum(dim=0, keepdim=False)  # (O)
+        
+        U = upstream_grad @ weight
+        V = x.t() @ upstream_grad  # V shape (CKK, O)
+        
+        
+        grad_feature = p10 * s_row + 2.0 * p20 * (x * s_row) + p11 * U
+        grad_weight = p01 * s_col + 2.0 * p02 * (weight.t() * s_col.view(1, -1)) + p11 * V
+        
+        
+        grad_feature = grad_feature.view(B, L, C*Kh*Kw).transpose(1, 2).contiguous()
+        grad_feature = F.fold(grad_feature, output_size=(H, W),
+                        kernel_size=(Kh, Kw),
+                        dilation=dilation, padding=padding, stride=stride)
+    
 
+        grad_weight = grad_weight.transpose(0, 1).contiguous().view(O, C, Kh, Kw)
+        
+        return grad_feature, grad_weight, None, None, None, None, None, grad_bias, None, None, None, None
+    
+    
 def conv2d_int8_custom(feature,
                     weight,
                     lut,
