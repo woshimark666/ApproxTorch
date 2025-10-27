@@ -10,6 +10,7 @@ cuda_functions = CUDAExtension('approxtorch.approx_gemm._C',[
         "./approxtorch/approx_gemm/csrc/int8_gemm_gradient.cu",
         "./approxtorch/approx_gemm/csrc/uint8_gemm.cu",
         "./approxtorch/approx_gemm/csrc/int8_depthwise_gemm.cu",
+        "./approxtorch/approx_gemm/csrc/int4_gemm.cu",
     ],                   
     include_dirs = ['approxtorch/approx_gemm/csrc'],
     extra_compile_args={'nvcc': ['-arch=native', '-std=c++17', "-O3"],

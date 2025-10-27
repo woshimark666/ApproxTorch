@@ -3,11 +3,13 @@ from torch import Tensor
 
 
 __all__ = ['gemm_int8', 'batch_gemm_int8', 'gemm_int8_naive', 'gemm_int8_old', 'gemm_int8_gradient', 'gemm_uint8', 
-            'depthwise_gemm_int8', 'depthwise_gemm_int8_gradient']
+            'depthwise_gemm_int8', 'depthwise_gemm_int8_gradient', 'gemm_int4']
 
 def gemm_int8(A: Tensor, B: Tensor, C: Tensor) -> Tensor:
     return torch.ops.approxtorch.gemm_int8.default(A, B, C)
 
+def gemm_int4(A: Tensor, B: Tensor, C: Tensor) -> Tensor:
+    return torch.ops.approxtorch.gemm_int4.default(A, B, C)
 
 @torch.library.register_fake("approxtorch::gemm_int8")
 def _(a, b, c):

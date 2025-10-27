@@ -99,6 +99,41 @@ def calibrate_int8(model, train_loader, data_precentage, qmethod=('static', 'ten
         print(f"State dict with scales saved to {save_path}")
 
 
+def calibrate_int4(model, train_loader, data_precentage, qmethod=('static', 'tensor', 'tensor'), save_path=None):
+    
+    # Calculate number of batches to process based on percentage
+    num_batches = int(len(train_loader) * data_precentage) if data_precentage < 1.0 else None
+    
+    # Collect min/max values
+    activation_absmax, weight_absmax = collect_absmax(model, train_loader, qmethod, num_batches)
+
+    first_conv_found = False
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Conv2d):
+            if not first_conv_found:
+                # Skip the first Conv2d layer
+                first_conv_found = True
+                continue
+            # 权重scale: channel级
+            w_scale = weight_absmax[name].detach().clone() / 7.5
+            a_scale = activation_absmax[name].detach().clone() / 7.5
+            # 注册buffer（如果已存在则覆盖）
+            if hasattr(module, 'scale_feature'):
+                module.activation_scale.copy_(torch.tensor(a_scale))
+            else:
+                module.register_buffer('scale_feature', a_scale)
+                
+            if hasattr(module, 'scale_weight'):
+                module.weight_scale.copy_(w_scale)
+            else:
+                module.register_buffer('scale_weight', w_scale)
+            
+
+    if save_path is not None:
+        torch.save(model.state_dict(), save_path)
+        print(f"State dict with scales saved to {save_path}")
+
+
 all_conv = (Conv2d_int8_STE, Conv2d_int8_EST, Depthwise_conv2d_int8_EST, Depthwise_conv2d_int8_STE)
 def forze_scale(model):
     """

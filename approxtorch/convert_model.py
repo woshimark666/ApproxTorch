@@ -1,13 +1,14 @@
 import torch
 import torch.nn as nn
 from approxtorch.nn import Conv2d_int8_STE, Linear_int8_STE, Conv2d_int8_EST, \
-Conv2d_uint8_STE, Linear_uint8_STE, Depthwise_conv2d_int8_EST, Depthwise_conv2d_int8_STE, Conv2d_int8_custom
+Conv2d_uint8_STE, Linear_uint8_STE, Depthwise_conv2d_int8_EST, Depthwise_conv2d_int8_STE, Conv2d_int8_custom, \
+Conv2d_int4_exact, Conv2d_int4_STE
 from typing import Literal
 
 # this function convert the model into approximate model
 def convert_model(model, 
                   lut,
-                  qtype: Literal['int8', 'uint8'] = 'int8',
+                  qtype: Literal['int8', 'uint8', 'int4_exact', 'int4'] = 'int8',
                   qmethod: tuple[str, str, str] = ('dynamic', 'tensor', 'tensor'),
                   gradient: Literal['ste', 'est', 'custom'] = 'ste',
                   coefficients: tuple = (0.0, 0.0, 0.0, 0.0, 0.0),
@@ -89,6 +90,16 @@ def convert_model(model,
                         new_module = Conv2d_int8_custom(in_channels, out_channels, kernel_size, 
                                                         lut, qmethod, coefficients, scale_feature, scale_weight,
                                                         bias, stride, padding, dilation, groups)
+                    
+                    case ('int4_exact', _ ):
+                        new_module = Conv2d_int4_exact(in_channels, out_channels, kernel_size,
+                                                        qmethod, scale_feature, scale_weight,
+                                                        bias, stride, padding, dilation, groups)
+                    case ('int4', 'ste'):
+                        new_module = Conv2d_int4_STE(
+                            in_channels, out_channels, kernel_size,
+                            lut, qmethod, scale_feature, scale_weight,
+                            bias, stride, padding, dilation, groups)
                     case _:
                         raise ValueError("Invalid qtype or gradient type")
             
