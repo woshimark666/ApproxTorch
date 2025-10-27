@@ -20,8 +20,27 @@ def load_lut(file_path, qtype: Literal['int8', 'int4'] = 'int8'):
 
 
 
+def load_double_gradient_lut(file0, file1, qtype: Literal['int8', 'int4'] = 'int8'):
+    if qtype == 'int8':
+        shape = 256
+    else:
+        shape = 16
+    
+    dx = np.loadtxt(file0, dtype=np.float32).reshape(shape, shape)
+    dy = np.loadtxt(file1, dtype=np.float32).reshape(shape, shape)
+    
+    dx = torch.tensor(dx)
+    dy = torch.tensor(dy)
 
+    dx.requires_grad_(False)
+    dy.requires_grad_(False)
+    
+    return (dx, dy)
 
+    
+    
+    
+    
 def load_gradient_lut(file_path):
     lut_array = np.loadtxt(file_path, dtype=np.float32).reshape(256, 2)
     lut_tensor = torch.tensor(lut_array)

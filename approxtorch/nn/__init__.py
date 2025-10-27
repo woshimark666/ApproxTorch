@@ -10,5 +10,5 @@ from .Linear_uint8 import Linear_uint8_STE
 
 
 # int4 series
-from .conv2d_int4 import conv2d_int4_exact, conv2d_int4_STE
-from .Conv2d_int4 import Conv2d_int4_exact, Conv2d_int4_STE
+from .conv2d_int4 import conv2d_int4_exact, conv2d_int4_STE, conv2d_int4_bit
+from .Conv2d_int4 import Conv2d_int4_exact, Conv2d_int4_STE, Conv2d_int4_BIT
