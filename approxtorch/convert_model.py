@@ -1,21 +1,18 @@
 import torch
 import torch.nn as nn
-from approxtorch.nn import Conv2d_int8_STE, Linear_int8_STE, Conv2d_int8_EST, \
-Conv2d_uint8_STE, Linear_uint8_STE, Depthwise_conv2d_int8_EST, Depthwise_conv2d_int8_STE, Conv2d_int8_custom, \
-Conv2d_int4_exact, Conv2d_int4_STE, Conv2d_int4_BIT
+from approxtorch.nn import Conv2d_int8
 from typing import Literal
 
 # this function convert the model into approximate model
 def convert_model(model, 
-                  lut,
-                  qtype: Literal['int8', 'uint8', 'int4_exact', 'int4'] = 'int8',
-                  qmethod: tuple[str, str, str] = ('dynamic', 'tensor', 'tensor'),
-                  gradient: Literal['ste', 'est', 'custom', 'bit'] = 'ste',
-                  coefficients: tuple = (0.0, 0.0, 0.0, 0.0, 0.0),
-                  gradient_lut=None, 
-                  conv_only=True,
-                  ignore_first_conv=True
-                  ):
+                lut,
+                qtype: str = 'int8',
+                qmethod: tuple[str, str, str] = ('dynamic', 'tensor', 'tensor'),
+                grad: str = 'ste',
+                grad_data = None, 
+                conv_only=True,
+                ignore_first_conv=True
+                ):
     
     
     # the first conv layer is ignored
@@ -58,65 +55,11 @@ def convert_model(model,
             
             new_module = None
             # check if this model is Normal Conv2d or Depthwise_Conv2d
-            if groups == out_channels:
-                # this is a Depthwise_Conv2d
-                match (qtype, gradient):
-                    case ('int8', 'ste'):
-                        new_module = Depthwise_conv2d_int8_STE(
-                            in_channels, out_channels, kernel_size,
-                            lut, qmethod, scale_feature, scale_weight,
-                            bias, stride, padding, dilation, groups)
-                    case ('int8', 'est'):
-                        new_module = Depthwise_conv2d_int8_EST(
-                            in_channels, out_channels, kernel_size,
-                            lut, gradient_lut, qmethod, scale_feature, scale_weight,
-                            bias, stride, padding, dilation, groups)
-                    case _:
-                        raise ValueError("Invalid qtype or gradient type")     
-            else:
-                # this is a Normal Conv2d
-                match (qtype, gradient):
-                    case ('int8', 'ste'):
-                        new_module = Conv2d_int8_STE(
-                            in_channels, out_channels, kernel_size,
-                            lut, qmethod, scale_feature, scale_weight,
-                            bias, stride, padding, dilation, groups)
-                    case ('int8', 'est'):
-                        new_module = Conv2d_int8_EST(
-                            in_channels, out_channels, kernel_size,
-                            lut, gradient_lut, qmethod, scale_feature, scale_weight,
-                            bias, stride, padding, dilation, groups)
-                    case ('int8', 'custom'):
-                        new_module = Conv2d_int8_custom(in_channels, out_channels, kernel_size, 
-                                                        lut, qmethod, coefficients, scale_feature, scale_weight,
-                                                        bias, stride, padding, dilation, groups)
-                    
-                    case ('int4_exact', _ ):
-                        new_module = Conv2d_int4_exact(in_channels, out_channels, kernel_size,
-                                                        qmethod, scale_feature, scale_weight,
-                                                        bias, stride, padding, dilation, groups)
-                    case ('int4', 'ste'):
-                        new_module = Conv2d_int4_STE(
-                            in_channels, out_channels, kernel_size,
-                            lut, qmethod, scale_feature, scale_weight,
-                            bias, stride, padding, dilation, groups)
-                        
-                    case ('int4', 'bit'):
-                        new_module = Conv2d_int4_BIT(in_channels, 
-                                                     out_channels, 
-                                                     kernel_size,
-                                                     lut, gradient_lut, qmethod, scale_feature, scale_weight,
-                                                    bias, stride, padding, dilation, groups)
-                    case _:
-                        raise ValueError("Invalid qtype or gradient type")
-            
-            # Transfer weights
-            new_module.weight.data.copy_(module.weight.data)
-            if bias is not None:
-                new_module.bias.data.copy_(module.bias.data)
+            if qtype == 'int8':
+                new_module = Conv2d_int8(
+                    in_channels, out_channels, kernel_size, lut, qmethod, scale_feature, scale_weight, grad, grad_data, bias, stride, padding, dilation, groups)
+
             modules_to_replace.append((name, new_module))
-
-
         # we don't convert to Linear anymore.
                     
         # elif isinstance(module, nn.Linear) and not conv_only:
