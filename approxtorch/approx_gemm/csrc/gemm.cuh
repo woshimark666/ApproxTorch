@@ -491,8 +491,16 @@ torch::Tensor naive_gemm_int8(
     const torch::Tensor& lut
 );
 
+
+//  The LRE gradient for uint8 and int8
 std::tuple<torch::Tensor, torch::Tensor> 
 gemm_int8_gradient( 
+    torch::Tensor& A, torch::Tensor& B, 
+    torch::Tensor& grad_A_lut, torch::Tensor& grad_B_lut
+);
+
+std::tuple<torch::Tensor, torch::Tensor> 
+gemm_uint8_gradient( 
     torch::Tensor& A, torch::Tensor& B, 
     torch::Tensor& grad_A_lut, torch::Tensor& grad_B_lut
 );

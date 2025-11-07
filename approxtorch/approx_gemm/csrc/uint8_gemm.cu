@@ -188,7 +188,7 @@ torch::Tensor gemm_uint8(
     const torch::Tensor& lut
 )
 {
-    constexpr uint BM=32, BN=32, BK=8, TM=4, TN=4;
+    constexpr uint BM=64, BN=64, BK=16, TM=4, TN=4;
     constexpr uint NUM_THREADS_PER_BLOCK = BM * BN / (TM * TN);
     
     const at::cuda::OptionalCUDAGuard device_guard(device_of(A));

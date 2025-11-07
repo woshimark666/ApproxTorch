@@ -5,12 +5,18 @@ namespace approxtorch{
 
 // look up helper
 __device__ __forceinline__ 
-float get_gradient(int8_t index, const float* __restrict__ gradient_lut){
+float get_gradient_int8(int8_t index, const float* __restrict__ gradient_lut){
     int idx = (int)index + 128;
     return __ldg(gradient_lut + idx);
 }
 
-__global__ void get_gradient_kernel(
+
+__device__ __forceinline__ 
+float get_gradient_uint8(uint8_t index, const float* __restrict__ gradient_lut){
+    return __ldg(gradient_lut + index);
+}
+
+__global__ void get_gradient_kernel_int8(
     const int tensor_size,
     const int8_t* __restrict__ tensor,
     const float* __restrict__ gradient_lut,
@@ -19,7 +25,21 @@ __global__ void get_gradient_kernel(
 {
     int thread_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (thread_idx < tensor_size){
-        grad_tensor[thread_idx] = get_gradient(tensor[thread_idx], gradient_lut);
+        grad_tensor[thread_idx] = get_gradient_int8(tensor[thread_idx], gradient_lut);
+    }
+}
+
+
+__global__ void get_gradient_kernel_uint8(
+    const int tensor_size,
+    const uint8_t* __restrict__ tensor,
+    const float* __restrict__ gradient_lut,
+    float* __restrict__ grad_tensor
+)
+{
+    int thread_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (thread_idx < tensor_size){
+        grad_tensor[thread_idx] = get_gradient_int8(tensor[thread_idx], gradient_lut);
     }
 }
 
@@ -50,12 +70,12 @@ gemm_int8_gradient(
     const float* grad_A_lut_ptr = grad_A_lut.data_ptr<float>();
     
     // use B to get grad_A 
-    get_gradient_kernel
+    get_gradient_kernel_int8
         <<<grid_size_A, block_size, 0, at::cuda::getCurrentCUDAStream()>>>
             (N*K, B_ptr, grad_A_lut_ptr, grad_A.data_ptr<float>());
 
     // use A to get grad_B
-    get_gradient_kernel
+    get_gradient_kernel_int8
         <<<grid_size_B, block_size, 0, at::cuda::getCurrentCUDAStream()>>>
             (M*K, A_ptr, grad_B_lut_ptr, grad_B.data_ptr<float>());
     
@@ -71,6 +91,54 @@ gemm_int8_gradient(
 
     return std::make_tuple(grad_A, grad_B);
 }
+
+
+std::tuple<torch::Tensor, torch::Tensor> 
+gemm_uint8_gradient( 
+    torch::Tensor& A, torch::Tensor& B, 
+    torch::Tensor& grad_A_lut, torch::Tensor& grad_B_lut
+)
+{
+    const at::cuda::OptionalCUDAGuard device_guard(device_of(A));
+    int M = A.size(0);
+    int K = A.size(1);
+    int N = B.size(1);
+    constexpr uint block_size = 256;
+    
+    uint grid_size_A = (K*N + block_size - 1) / block_size;
+    uint grid_size_B = (M*K + block_size - 1) / block_size;
+
+    
+
+    auto options = torch::TensorOptions().dtype(torch::kFloat).device(A.device());
+    torch::Tensor grad_A = torch::zeros({K, N}, options);  // dA 应该是B的形状
+    torch::Tensor grad_B = torch::zeros({M, K}, options);  // dB 应该是A的形状
+
+    const uint8_t* B_ptr = B.data_ptr<uint8_t>();
+    const uint8_t* A_ptr = A.data_ptr<uint8_t>();
+    const float* grad_B_lut_ptr = grad_B_lut.data_ptr<float>();
+    const float* grad_A_lut_ptr = grad_A_lut.data_ptr<float>();
+    
+    // use B to get grad_A 
+    get_gradient_kernel_uint8
+        <<<grid_size_A, block_size, 0, at::cuda::getCurrentCUDAStream()>>>
+            (N*K, B_ptr, grad_A_lut_ptr, grad_A.data_ptr<float>());
+
+    // use A to get grad_B
+    get_gradient_kernel_uint8
+        <<<grid_size_B, block_size, 0, at::cuda::getCurrentCUDAStream()>>>
+            (M*K, A_ptr, grad_B_lut_ptr, grad_B.data_ptr<float>());
+    // cudaDeviceSynchronize();
+
+    // check for errors
+    cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        printf("CUDA error: %s\n", cudaGetErrorString(error));
+    }
+
+    return std::make_tuple(grad_A, grad_B);
+}
+
 
 
 std::tuple<torch::Tensor, torch::Tensor> 
@@ -105,12 +173,12 @@ depthwise_gemm_int8_gradient(
     const float* grad_X_lut_ptr = grad_X_lut.data_ptr<float>();
     
     // use W to get grad_X
-    get_gradient_kernel
+    get_gradient_kernel_int8
         <<<grid_size_A, block_size, 0, at::cuda::getCurrentCUDAStream()>>>
             (C*KK, W_ptr, grad_X_lut_ptr, grad_X.data_ptr<float>());
 
     // use X to get grad_W
-    get_gradient_kernel
+    get_gradient_kernel_int8
         <<<grid_size_B, block_size, 0, at::cuda::getCurrentCUDAStream()>>>
             (B*C*KK*L, X_ptr, grad_W_lut_ptr, grad_W.data_ptr<float>());
     
@@ -131,11 +199,13 @@ depthwise_gemm_int8_gradient(
 
 TORCH_LIBRARY_FRAGMENT(approxtorch, m){
     m.def("gemm_int8_gradient(Tensor A, Tensor B, Tensor grad_A_lut, Tensor grad_B_lut) -> (Tensor, Tensor)");
+    m.def("gemm_uint8_gradient(Tensor A, Tensor B, Tensor grad_A_lut, Tensor grad_B_lut) -> (Tensor, Tensor)");
     m.def("depthwise_gemm_int8_gradient(Tensor X, Tensor W, Tensor grad_X_lut, Tensor grad_W_lut) -> (Tensor, Tensor)");
 }
 
 TORCH_LIBRARY_IMPL(approxtorch, CUDA, m){
     m.impl("gemm_int8_gradient", &gemm_int8_gradient);
+    m.impl("gemm_uint8_gradient", &gemm_uint8_gradient);
     m.impl("depthwise_gemm_int8_gradient", &depthwise_gemm_int8_gradient);
 }
 
