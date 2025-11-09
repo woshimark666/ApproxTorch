@@ -74,8 +74,8 @@ class _conv2d_int8(Function):
         feature = feature.to(torch.int8)
         weight = weight.to(torch.int8)
         
-        # save int8 matrix feature and weight for EST backward
-        if grad == 'est':
+        # save int8 matrix feature and weight for LRE backward
+        if grad == 'lre':
             ctx.save_for_backward(feature, weight, scale_feature, scale_weight, grad_data[0], grad_data[1])
             ctx.feature_shape = (B, C, H, W)
             ctx.weight_shape = (O, C, Kh, Kw)
@@ -125,7 +125,7 @@ class _conv2d_int8(Function):
                 grad_feature = torch.nn.grad.conv2d_input(feature.shape, weight, up_grad, stride=ctx.stride, padding=ctx.padding, dilation=ctx.dilation)
                 grad_weight = torch.nn.grad.conv2d_weight(feature, weight.shape, up_grad, stride=ctx.stride, padding=ctx.padding, dilation=ctx.dilation)
 
-            case "est":
+            case "lre":
                 (B, C, H, W) = ctx.feature_shape
                 (O, C, Kh, Kw) = ctx.weight_shape
                 (B, O, OH, OW) = ctx.output_shape
@@ -360,17 +360,17 @@ def conv2d_int8(feature,
         return grad_feature, grad_weight, None, None, None, None, None, grad_bias, None, None, None, None
     
     
-def conv2d_int8_custom(feature,
-                    weight,
-                    lut,
-                    coefficients: tuple | None = (0.0, 0.0, 0.0, 0.0, 0.0),
-                    qmethod: tuple[str, str, str] = ('dynamic', 'tensor', 'channel'),
-                    scale_feature: torch.Tensor | None = None,
-                    scale_weight: torch.Tensor | None = None,
-                    bias = None,
-                    stride: Union[int, Tuple[int, int]] = 1,
-                    padding: Union[int, Tuple[int, int]] = 0,
-                    dilation: Union[int, Tuple[int, int]] = 1,
-                    groups: int = 1):
+# def conv2d_int8_custom(feature,
+#                     weight,
+#                     lut,
+#                     coefficients: tuple | None = (0.0, 0.0, 0.0, 0.0, 0.0),
+#                     qmethod: tuple[str, str, str] = ('dynamic', 'tensor', 'channel'),
+#                     scale_feature: torch.Tensor | None = None,
+#                     scale_weight: torch.Tensor | None = None,
+#                     bias = None,
+#                     stride: Union[int, Tuple[int, int]] = 1,
+#                     padding: Union[int, Tuple[int, int]] = 0,
+#                     dilation: Union[int, Tuple[int, int]] = 1,
+#                     groups: int = 1):
     
-    return _conv2d_int8_custom.apply(feature, weight, lut, qmethod, scale_feature, scale_weight, coefficients, bias, stride, padding, dilation, groups)
+#     return _conv2d_int8_custom.apply(feature, weight, lut, qmethod, scale_feature, scale_weight, coefficients, bias, stride, padding, dilation, groups)

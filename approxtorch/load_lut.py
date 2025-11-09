@@ -41,7 +41,7 @@ def load_double_gradient_lut(file0, file1, qtype: Literal['int8', 'int4'] = 'int
     
     
     
-def load_gradient_lut(file_path):
+def load_lre_grad_lut(file_path):
     lut_array = np.loadtxt(file_path, dtype=np.float32).reshape(256, 2)
     lut_tensor = torch.tensor(lut_array)
     lut_tensor.requires_grad_(False)

@@ -1,17 +1,18 @@
 import torch
 import torch.nn as nn
-from approxtorch.nn import Conv2d_int8
+from approxtorch.nn import Conv2d_int8, Conv2d_uint8
 from typing import Literal
 
 # this function convert the model into approximate model
+# qtype: uint8 or int8
 def convert_model(model, 
                 lut,
                 qtype: str = 'int8',
                 qmethod: tuple[str, str, str] = ('dynamic', 'tensor', 'tensor'),
                 grad: str = 'ste',
                 grad_data = None, 
-                conv_only=True,
-                ignore_first_conv=True
+                conv_only = True,
+                ignore_first_conv = True
                 ):
     
     
@@ -39,26 +40,47 @@ def convert_model(model,
             bias = module.bias
             groups = module.groups
             
-            
-            match qmethod:
-                case ('static', 'tensor', 'tensor'):
+            scale_feature, zero_feature, scale_weight, zero_weight = None, None, None, None
+            match (qtype, qmethod):
+                
+                case (_, ('dynamic', _, _)):
+                    pass
+                
+                case ('uint8', ('static', 'tensor', 'tensor')):
+                    scale_feature = torch.randn(())
+                    zero_feature = torch.randn(())
+                    scale_weight = torch.randn(())
+                    zero_weight = torch.randn(())
+                case ('uint8', ('static', 'tensor', 'channel')):
+                    scale_feature = torch.randn(())
+                    zero_feature = torch.randn(())
+                    scale_weight = torch.randn(out_channels)
+                    zero_weight = torch.randn(out_channels)
+                case ('int8', ('static', 'tensor', 'tensor')):
                     scale_feature = torch.randn(())
                     scale_weight = torch.randn(())
-                case ('static', 'tensor', 'channel'):
+                case ('int8', ('static', 'tensor', 'channel')):
                     scale_feature = torch.randn(())
                     scale_weight = torch.randn(out_channels)
-                case ('dynamic', _, _):
-                    scale_feature = None
-                    scale_weight = None
                 case _:
                     raise ValueError("Invalid qmethod")
             
             new_module = None
             # check if this model is Normal Conv2d or Depthwise_Conv2d
-            if qtype == 'int8':
-                new_module = Conv2d_int8(
-                    in_channels, out_channels, kernel_size, lut, qmethod, scale_feature, scale_weight, grad, grad_data, bias, stride, padding, dilation, groups)
-
+            match qtype: 
+                case 'int8':
+                    new_module = Conv2d_int8(
+                        in_channels, out_channels, kernel_size, lut, qmethod, scale_feature, scale_weight, grad, grad_data, bias, stride, padding, dilation, groups
+                    )
+                    
+                case 'uint8':
+                    new_module = Conv2d_uint8(
+                        in_channels, out_channels, kernel_size, lut, qmethod, scale_feature, zero_feature, scale_weight, zero_weight, \
+                            grad, grad_data, bias, stride, padding, dilation, groups
+                    )
+                case _:
+                    raise ValueError("Invalid qtype")
+                
             modules_to_replace.append((name, new_module))
         # we don't convert to Linear anymore.
                     
@@ -77,7 +99,7 @@ def convert_model(model,
         #     if bias is not None:
         #         new_module.bias.data.copy_(module.bias.data)
         #     modules_to_replace.append((name, new_module))
-
+        
     for name, new_module in modules_to_replace:
         parent_name, attr_name = name.rsplit('.', 1) if '.' in name else ('', name)
         parent_module = dict(model.named_modules())[parent_name] if parent_name else model
