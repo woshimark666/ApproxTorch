@@ -105,19 +105,19 @@ class Conv2d_int8(torch.nn.Module):
         if not self.frozen_scale and self.qmethod[0] == 'static':
             self.updata_scale(x, self.weight, self.qmethod)
             
-        return conv2d_int8.conv2d_int8(x, 
-                                    self.weight,
-                                    self.lut,
-                                    self.qmethod,
-                                    self.scale_feature,
-                                    self.scale_weight,
-                                    self.grad,
-                                    self.grad_data,
-                                    self.bias,
-                                    self.stride,
-                                    self.padding,
-                                    self.dilation,
-                                    self.groups)
+        return conv2d_int8(x, 
+                        self.weight,
+                        self.lut,
+                        self.qmethod,
+                        self.scale_feature,
+                        self.scale_weight,
+                        self.grad,
+                        self.grad_data,
+                        self.bias,
+                        self.stride,
+                        self.padding,
+                        self.dilation,
+                        self.groups)
         
         
 # class Conv2d_int8_custom(torch.nn.Module):

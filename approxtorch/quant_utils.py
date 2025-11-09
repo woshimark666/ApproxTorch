@@ -1,5 +1,5 @@
 import torch
-from .nn import Conv2d_int8_STE, Conv2d_int8_EST, Depthwise_conv2d_int8_EST, Depthwise_conv2d_int8_STE
+from .nn import Conv2d_int8, Conv2d_uint8
 import copy
 
 # collect the min/max for each layer's activation and weight
@@ -160,26 +160,30 @@ def calibrate_uint8(model, train_loader, data_precentage, qmethod=('static', 'te
             a_scale = (activation_max[name] - activation_min[name]) / 255.
             a_zero = - torch.round(activation_min[name] / a_scale)
             
+            w_scale = w_scale.detach().clone()
+            w_zero = w_zero.detach().clone()
+            a_scale = a_scale.detach().clone()
+            a_zero = a_zero.detach().clone()
             # 注册buffer（如果已存在则覆盖）
             if hasattr(module, 'scale_feature'):
-                module.activation_scale.copy_(torch.tensor(a_scale))
+                module.activation_scale.copy_(a_scale)
             else:
-                module.register_buffer('scale_feature', torch.tensor(a_scale))
+                module.register_buffer('scale_feature', a_scale)
                 
             if hasattr(module, 'zero_feature'):
-                module.zero_feature.copy_(torch.tensor(a_zero))
+                module.zero_feature.copy_(a_zero)
             else:
-                module.register_buffer('zero_feature', torch.tensor(a_zero))
+                module.register_buffer('zero_feature', a_zero)
                 
             if hasattr(module, 'scale_weight'):
                 module.weight_scale.copy_(w_scale)
             else:
-                module.register_buffer('scale_weight', torch.tensor(w_scale))
+                module.register_buffer('scale_weight', w_scale)
                 
             if hasattr(module, 'zero_weight'):
-                module.zero_weight.copy_(torch.tensor(w_zero))
+                module.zero_weight.copy_(w_zero)
             else:
-                module.register_buffer('zero_weight', torch.tensor(w_zero))
+                module.register_buffer('zero_weight', w_zero)
             
 
     if save_path is not None:
@@ -261,7 +265,7 @@ def calibrate_int4(model, train_loader, data_precentage, qmethod=('static', 'ten
 
 
 
-all_conv = (Conv2d_int8_STE, Conv2d_int8_EST, Depthwise_conv2d_int8_EST, Depthwise_conv2d_int8_STE)
+all_conv = (Conv2d_int8, Conv2d_uint8)
 def forze_scale(model):
     """
     input the model and forze all the scale parameters

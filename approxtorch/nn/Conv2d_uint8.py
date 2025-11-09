@@ -73,11 +73,11 @@ class Conv2d_uint8(torch.nn.Module):
         else:
             raise ValueError("Invalid bias type")
     
-        def __repr__(self):
-            return f"Conv2d_uint8(in_channels={self.in_channels}, out_channels={self.out_channels}, " \
-                f"kernel_size={self.kernel_size}, qmethod={self.qmethod}, grad={self.grad}, " \
-                f"bias={self.has_bias}, stride={self.stride}, padding={self.padding}, " \
-                f"dilation={self.dilation}, groups={self.groups}, freeze_scales={self.frozen_scale})"
+    def __repr__(self):
+        return f"Conv2d_uint8(in_channels={self.in_channels}, out_channels={self.out_channels}, " \
+            f"kernel_size={self.kernel_size}, qmethod={self.qmethod}, grad={self.grad}, " \
+            f"bias={self.has_bias}, stride={self.stride}, padding={self.padding}, " \
+            f"dilation={self.dilation}, groups={self.groups}, freeze_scales={self.frozen_scale})"
                 
     def updata_scale(self, x, weight, qmethod):
         max_feature = torch.max(x, keepdim=False)
@@ -115,18 +115,18 @@ class Conv2d_uint8(torch.nn.Module):
     def forward(self, x):
         if not self.frozen_scale and self.qmethod[0] == 'static':
             self.updata_scale(x, self.weight, self.qmethod)
-        return  conv2d_uint8.conv2d_uint8(x, 
-                                        self.weight,
-                                        self.lut,
-                                        self.qmethod,
-                                        self.scale_feature,
-                                        self.zero_feature,
-                                        self.scale_weight,
-                                        self.zero_weight,
-                                        self.grad,
-                                        self.grad_data,
-                                        self.bias,
-                                        self.stride,
-                                        self.padding,
-                                        self.dilation,
-                                        self.groups)
+        return  conv2d_uint8(x, 
+                        self.weight,
+                        self.lut,
+                        self.qmethod,
+                        self.scale_feature,
+                        self.zero_feature,
+                        self.scale_weight,
+                        self.zero_weight,
+                        self.grad,
+                        self.grad_data,
+                        self.bias,
+                        self.stride,
+                        self.padding,
+                        self.dilation,
+                        self.groups)
