@@ -80,17 +80,18 @@ class Conv2d_uint8(torch.nn.Module):
             f"dilation={self.dilation}, groups={self.groups}, freeze_scales={self.frozen_scale})"
                 
     def updata_scale(self, x, weight, qmethod):
-        max_feature = torch.max(x, keepdim=False)
-        min_feature = torch.min(x, keepdim=False)
+        max_feature = torch.max(x)
+        min_feature = torch.min(x)
         new_scale_feature = (max_feature - min_feature) / 255.
         new_zero_feature = - torch.round(min_feature / new_scale_feature)
         if qmethod[2] == 'channel':
-            max_weight, min_weight = torch.aminmax(weight, dim=(1,2,3), keepdim=False)
+            max_weight = torch.amax(weight, dim=(1,2,3), keepdim=False)
+            min_weight = torch.amin(weight, dim=(1,2,3), keepdim=False)
             new_scale_weight = (max_weight - min_weight) / 255.
             new_zero_weight = - torch.round(min_weight / new_scale_weight)
         elif qmethod[2] == 'tensor':
-            max_weight = torch.max(weight, keepdim=False)
-            min_weight = torch.min(weight, keepdim=False)
+            max_weight = torch.max(weight)
+            min_weight = torch.min(weight)
             new_scale_weight = (max_weight - min_weight) / 255.
             new_zero_weight = - torch.round(min_weight / new_scale_weight)
         

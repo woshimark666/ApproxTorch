@@ -36,7 +36,8 @@ class _conv2d_uint8(Function):
         OH = math.floor((H + 2*padding[0] - dilation[0]*(Kh-1) - 1)/stride[0] + 1)
         OW = math.floor((W + 2*padding[1] - dilation[1]*(Kw-1) - 1)/stride[1] + 1)
         L = OH * OW
-
+        if grad == 'ste':
+            ctx.save_for_backward(feature, weight)
         # 1. quantization 
         match qmethod:
             case ('dynamic', 'tensor', 'tensor'):
@@ -59,9 +60,6 @@ class _conv2d_uint8(Function):
                     raise ValueError("scale or zero point is not provided")
             case _:
                 raise ValueError(f"Invalid quantization method: {qmethod}")
-        
-        if grad == 'ste':
-            ctx.save_for_backward(feature, weight)
         
         # 2. im2col
         feature = F.unfold(feature, (Kh, Kw), stride=stride, padding=padding, dilation=dilation) # (B, CKK, L)
@@ -172,6 +170,7 @@ class _conv2d_uint8(Function):
                     grad_weight = grad_weight.contiguous().view(O, C, Kh, Kw)
             case _:
                 raise ValueError(f"Invalid gradient method: {ctx.grad}")
+            
         return grad_feature, grad_weight, None, None, None, None, None, None, None, None, grad_bias, None, None, None, None
     
     

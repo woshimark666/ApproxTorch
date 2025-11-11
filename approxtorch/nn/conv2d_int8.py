@@ -37,6 +37,11 @@ class _conv2d_int8(Function):
         OW = math.floor((W + 2*padding[1] - dilation[1]*(Kw-1) - 1)/stride[1] + 1)
         L = OH * OW
         
+        
+        # save original input tensor just for STE backward
+        if grad == 'ste':
+            ctx.save_for_backward(feature, weight)
+        
         # 1. quantization
         match qmethod:
             case ('dynamic', 'tensor', 'tensor'):
@@ -62,9 +67,7 @@ class _conv2d_int8(Function):
         
         # 2. im2col 
         
-        # save original input tensor just for STE backward
-        if grad == 'ste':
-            ctx.save_for_backward(feature, weight)
+
         
         feature = F.unfold(feature, (Kh, Kw), stride=stride, padding=padding, dilation=dilation) # (B, CKK, L)
         feature = feature.transpose(1, 2).contiguous().view(-1, C*Kh*Kw) # (B*L, CKK)
