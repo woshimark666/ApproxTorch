@@ -188,7 +188,22 @@ class _conv2d_uint8(Function):
                 del mat_feature, mat_weight
                 
                 if ctx.qmethod[1:] == ('tensor', 'channel'):
-                    pass
+                    grad_feature = at.approx_gemm.ops.fetch_gemm_custom_grad(index, grad_lut_dx)
+                    # (BL, O, CKK)
+                    grad_feature = (grad_feature - zero_weight.view(1, -1, 1)) * scale_weight.view(1, -1, 1)
+                    grad_feature = grad_feature * upstream_grad.unsqueeze(2)
+                    grad_feature = grad_feature.sum(dim=1, keepdim=False)
+                    grad_feature = grad_feature.view(B, L, C*Kh*Kw).transpose(1, 2).contiguous()
+                    grad_feature = torch.nn.functional.fold(grad_feature, (H, W), 
+                                kernel_size=(Kh, Kw), padding=ctx.padding, 
+                                stride=ctx.stride, dilation=ctx.dilation)
+                    
+                    grad_weight = at.approx_gemm.ops.fetch_gemm_custom_grad(index, grad_lut_dy)
+                    # (BL, CKK, O)
+                    del index
+                    grad_weight = ((grad_weight - zero_feature) * scale_feature * upstream_grad.unsqueeze(2)).sum(dim=0)
+                    grad_weight = grad_weight.view(O, C, Kh, Kw)
+                    
                 elif ctx.qmethod[1:] == ('tensor', 'tensor'):
                     # grad_feature = ((grad_lut_dx[index] - zero_weight) * scale_weight * upstream_grad.unsqueeze(2)).sum(dim=1)
                     grad_feature = ((at.approx_gemm.ops.fetch_gemm_custom_grad(index, grad_lut_dx) - zero_weight) * scale_weight * upstream_grad.unsqueeze(2)).sum(dim=1)
