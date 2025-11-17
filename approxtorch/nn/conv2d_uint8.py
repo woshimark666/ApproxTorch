@@ -70,13 +70,15 @@ class _conv2d_uint8(Function):
         feature = feature.to(torch.uint8)
         weight = weight.to(torch.uint8)
         
-        if grad == 'lre':
-            ctx.qmethod = qmethod
-            ctx.feature_shape = (B, C, H, W)
-            ctx.weight_shape = (O, C, Kh, Kw)
-            ctx.output_shape = (B, O, OH, OW)
-            ctx.save_for_backward(feature, weight, scale_feature, scale_weight, zero_feature, \
-                zero_weight, grad_data[0], grad_data[1])
+        match grad:
+            case 'lre' | 'custom':
+                ctx.qmethod = qmethod
+                ctx.feature_shape = (B, C, H, W)
+                ctx.weight_shape = (O, C, Kh, Kw)
+                ctx.output_shape = (B, O, OH, OW)
+                ctx.save_for_backward(feature, weight, scale_feature, scale_weight, zero_feature, \
+                    zero_weight, grad_data[0], grad_data[1])
+            
             
         ctx.has_bias = bias is not None
         ctx.grad = grad
@@ -94,12 +96,14 @@ class _conv2d_uint8(Function):
                 output = output - zero_feature * weight.sum(dim=0, keepdim=True) - \
                             zero_weight * feature.sum(dim=1, keepdim=True) + \
                                 C*Kh*Kw*zero_feature*zero_weight
+                output = output * scale_feature * scale_weight    
             case (_, 'tensor', 'channel'):
                 output = output - zero_feature * weight.sum(dim=0, keepdim=True) - \
                             zero_weight.unsqueeze(0) * feature.sum(dim=1, keepdim=True) + \
                                 C*Kh*Kw*zero_feature*zero_weight
-        
-        output = output * scale_feature * scale_weight    
+                output = output * scale_feature * scale_weight.view(1, -1, 1, 1)
+            case _:
+                raise ValueError(f"Invalid quantization method: {qmethod}")
         
         # 5. reshape the output tensor
         output = output.view(B, L, O)
@@ -168,6 +172,38 @@ class _conv2d_uint8(Function):
                     grad_weight = scale_feature * grad_weight - zero_feature / scale_weight # (BL, CKK)
                     grad_weight = upstream_grad.t().matmul(grad_weight) # (0, CKK)
                     grad_weight = grad_weight.contiguous().view(O, C, Kh, Kw)
+                    
+            case 'custom':
+                (B, C, H, W) = ctx.feature_shape
+                (O, C, Kh, Kw) = ctx.weight_shape
+                (B, O, OH, OW) = ctx.output_shape
+                L = OH * OW
+                mat_feature, mat_weight, scale_feature, scale_weight, zero_feature, zero_weight, \
+                grad_lut_dx, grad_lut_dy = ctx.saved_tensors
+                upstream_grad = upstream_grad.view(B, O, L).transpose(1,2).contiguous().view(B*L, O) # (BL, O)
+                # mat_feature (BL, CKK), mat_weight (CKK, O)
+                mat_feature = mat_feature.to(torch.int).unsqueeze(1) # (BL, 1, CKK)
+                mat_weight = mat_weight.to(torch.int).transpose(0, 1).unsqueeze(0) # (1, O, CKK)
+                index = mat_feature * 256 + mat_weight # (BL, O, CKK)
+                del mat_feature, mat_weight
+                
+                if ctx.qmethod[1:] == ('tensor', 'channel'):
+                    pass
+                elif ctx.qmethod[1:] == ('tensor', 'tensor'):
+                    grad_feature = ((grad_lut_dx[index] - zero_weight) * scale_weight * upstream_grad.unsqueeze(2)).sum(dim=1)
+                    # (BL, CKK)
+                    grad_feature = grad_feature.view(B, L, C*Kh*Kw).transpose(1, 2).contiguous()
+                    # (B, CKK, L)
+                    grad_feature = torch.nn.functional.fold(grad_feature, (H, W), 
+                                kernel_size=(Kh, Kw), padding=ctx.padding, 
+                                stride=ctx.stride, dilation=ctx.dilation)
+                    # (B, C, H, W)
+                    
+                    grad_weight = ((grad_lut_dy[index] - zero_feature) * scale_feature * upstream_grad.unsqueeze(2)).sum(dim=0)
+                    # (O, CKK)
+                    del index
+
+                    grad_weight = grad_weight.view(O, C, Kh, Kw)
             case _:
                 raise ValueError(f"Invalid gradient method: {ctx.grad}")
             

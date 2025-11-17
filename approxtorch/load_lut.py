@@ -52,3 +52,22 @@ def load_lre_grad_lut(file_path):
     grad_lut_dy = grad_lut_dy.contiguous()
     grad_lut = (grad_lut_dx, grad_lut_dy)
     return grad_lut   
+
+def load_custom_grad_lut(file_path):
+    if isinstance(file_path, tuple) and len(file_path) == 2 and all(isinstance(f, str) for f in file_path):
+        # 如果 file_path 是一个由两个字符串组成的 tuple
+        grad_a = np.loadtxt(file_path[0], dtype=np.float32)
+        grad_b = np.loadtxt(file_path[1], dtype=np.float32)
+        grad_a = torch.tensor(grad_a)
+        grad_b = torch.tensor(grad_b)
+        grad_a = grad_a.view(-1)
+        grad_b = grad_b.view(-1)
+        return grad_a, grad_b
+    else:
+        grad_a = np.loadtxt(file_path+'_grad_a.txt', dtype=np.float32)
+        grad_b = np.loadtxt(file_path+'_grad_b.txt', dtype=np.float32)
+        grad_a = torch.tensor(grad_a)
+        grad_b = torch.tensor(grad_b)
+        grad_a = grad_a.view(-1)
+        grad_b = grad_b.view(-1)
+        return grad_a, grad_b

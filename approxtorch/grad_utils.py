@@ -53,3 +53,4 @@ def generate_socc_lre_grad(multiplier, qtype, save_path):
     
     np.savetxt(save_path, grad_lut, fmt='%.4f')
     return grad_lut
+
