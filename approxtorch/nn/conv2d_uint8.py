@@ -190,7 +190,8 @@ class _conv2d_uint8(Function):
                 if ctx.qmethod[1:] == ('tensor', 'channel'):
                     pass
                 elif ctx.qmethod[1:] == ('tensor', 'tensor'):
-                    grad_feature = ((grad_lut_dx[index] - zero_weight) * scale_weight * upstream_grad.unsqueeze(2)).sum(dim=1)
+                    # grad_feature = ((grad_lut_dx[index] - zero_weight) * scale_weight * upstream_grad.unsqueeze(2)).sum(dim=1)
+                    grad_feature = ((at.approx_gemm.ops.fetch_gemm_custom_grad(index, grad_lut_dx) - zero_weight) * scale_weight * upstream_grad.unsqueeze(2)).sum(dim=1)
                     # (BL, CKK)
                     grad_feature = grad_feature.view(B, L, C*Kh*Kw).transpose(1, 2).contiguous()
                     # (B, CKK, L)
@@ -199,7 +200,8 @@ class _conv2d_uint8(Function):
                                 stride=ctx.stride, dilation=ctx.dilation)
                     # (B, C, H, W)
                     
-                    grad_weight = ((grad_lut_dy[index] - zero_feature) * scale_feature * upstream_grad.unsqueeze(2)).sum(dim=0)
+                    # grad_weight = ((grad_lut_dy[index] - zero_feature) * scale_feature * upstream_grad.unsqueeze(2)).sum(dim=0)
+                    grad_weight = ((at.approx_gemm.ops.fetch_gemm_custom_grad(index, grad_lut_dy) - zero_feature) * scale_feature * upstream_grad.unsqueeze(2)).sum(dim=0)
                     # (O, CKK)
                     del index
 

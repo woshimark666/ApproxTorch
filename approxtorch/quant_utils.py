@@ -68,8 +68,8 @@ def collect_minmax(model, dataloader, qmethod, num_batches=None):
                 weight_max[name] = torch.amax(weight, dim=(1,2,3), keepdim=False)
                 weight_min[name] = torch.amin(weight, dim=(1,2,3), keepdim=False)
             elif qmethod[2] == 'tensor':
-                weight_max[name] = torch.max(weight, keepdim=False)
-                weight_min[name] = torch.min(weight, keepdim=False)
+                weight_max[name] = torch.max(weight)
+                weight_min[name] = torch.min(weight)
             else:
                 raise ValueError(f"Invalid qmethod: {qmethod}")
 

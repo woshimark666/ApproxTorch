@@ -55,9 +55,10 @@ class Conv2d_uint8(torch.nn.Module):
         match grad:
             case "ste":
                 self.grad_data = None
-            case 'lre':
-                self.grad_data = (torch.nn.Parameter(grad_data[0], requires_grad=False), \
-                    torch.nn.Parameter(grad_data[1], requires_grad=False))
+            case 'lre' | 'custom':
+                self.grad_lut_dx = torch.nn.Parameter(grad_data[0], requires_grad=False)
+                self.grad_lut_dy = torch.nn.Parameter(grad_data[1], requires_grad=False)
+                self.grad_data = (self.grad_lut_dx, self.grad_lut_dy)
             case _:
                 raise ValueError("Invalid gradient method")
         

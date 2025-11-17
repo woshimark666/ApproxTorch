@@ -2,9 +2,9 @@ import numpy as np
 import torch
 from typing import Literal
 
-def load_lut(file_path, qtype: Literal['int8', 'int4'] = 'int8'):
+def load_lut(file_path, qtype: Literal['int8', 'int4', 'uint8'] = 'int8'):
     
-    if qtype == 'int8':
+    if qtype == 'int8' or qtype == 'uint8':
         shape = 256
     else:
         shape = 16
