@@ -20,11 +20,6 @@ __global__ void fetch_custom_grad_kernel(int tensor_size,
     }
 }
 
-
-
-
-
-
 torch::Tensor fetch_gemm_custom_grad(torch::Tensor& index_tensor, torch::Tensor& grad_lut_tensor)
 {
     int M = index_tensor.size(0);
