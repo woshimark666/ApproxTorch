@@ -53,5 +53,5 @@ def depthwise_gemm_int8_gradient(X: Tensor, W: Tensor, grad_X_lut: Tensor, grad_
     return torch.ops.approxtorch.depthwise_gemm_int8_gradient.default(X, W, grad_X_lut, grad_W_lut)
 
 
-def fetch_gemm_custom_grad(index_tensor: Tensor, grad_lut_tensor: Tensor) -> Tensor:
-    return torch.ops.approxtorch.fetch_gemm_custom_grad.default(index_tensor, grad_lut_tensor)
+def gemm_custom_grad_uint8_tt(A: Tensor, B: Tensor, upstream_grad: Tensor, grad_lut_dx: Tensor, grad_lut_dy: Tensor, scale_A: Tensor, zero_A: Tensor, scale_B: Tensor, zero_B: Tensor) -> tuple[Tensor, Tensor]:
+    return torch.ops.approxtorch.gemm_custom_grad_uint8_tt.default(A, B, upstream_grad, grad_lut_dx, grad_lut_dy, scale_A, zero_A, scale_B, zero_B)

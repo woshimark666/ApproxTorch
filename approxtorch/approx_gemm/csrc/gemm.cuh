@@ -587,9 +587,13 @@ torch::Tensor gemm_int4(
     const torch::Tensor& lut
 );
 
-torch::Tensor fetch_gemm_custom_grad(
-    torch::Tensor& index_tensor, 
-    torch::Tensor& grad_lut_tensor);
+std::tuple<torch::Tensor, torch::Tensor>
+gemm_custom_grad_uint8_tt(const torch::Tensor& A, const torch::Tensor& B,
+                const torch::Tensor& upstream_grad,
+                const torch::Tensor& grad_lut_dx,
+                const torch::Tensor& grad_lut_dy,
+                const torch::Tensor& scale_A, const torch::Tensor& zero_A,
+                const torch::Tensor& scale_B, const torch::Tensor& zero_B);
 
 }
 
