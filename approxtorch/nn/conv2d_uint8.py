@@ -182,44 +182,19 @@ class _conv2d_uint8(Function):
                 grad_lut_dx, grad_lut_dy = ctx.saved_tensors
                 upstream_grad = upstream_grad.view(B, O, L).transpose(1,2).contiguous().view(B*L, O) # (BL, O)
                 # mat_feature (BL, CKK), mat_weight (CKK, O)
-                mat_feature = mat_feature.to(torch.int).unsqueeze(2) # (BL, CKK, 1)
-                mat_weight = mat_weight.to(torch.int).unsqueeze(0) # (1, CKK, O)
-                index = mat_feature * 256 + mat_weight # (BL, CKK, O)
-                del mat_feature, mat_weight
-                
+      
                 if ctx.qmethod[1:] == ('tensor', 'channel'):
-                    grad_feature = at.approx_gemm.ops.fetch_gemm_custom_grad(index, grad_lut_dx)
-                    # (BL, O, CKK)
-                    grad_feature = (grad_feature - zero_weight.view(1, -1, 1)) * scale_weight.view(1, -1, 1)
-                    grad_feature = grad_feature * upstream_grad.unsqueeze(2)
-                    grad_feature = grad_feature.sum(dim=1, keepdim=False)
-                    grad_feature = grad_feature.view(B, L, C*Kh*Kw).transpose(1, 2).contiguous()
-                    grad_feature = torch.nn.functional.fold(grad_feature, (H, W), 
-                                kernel_size=(Kh, Kw), padding=ctx.padding, 
-                                stride=ctx.stride, dilation=ctx.dilation)
-                    
-                    grad_weight = at.approx_gemm.ops.fetch_gemm_custom_grad(index, grad_lut_dy)
-                    # (BL, CKK, O)
-                    del index
-                    grad_weight = ((grad_weight - zero_feature) * scale_feature * upstream_grad.unsqueeze(2)).sum(dim=0)
-                    grad_weight = grad_weight.view(O, C, Kh, Kw)
+                    pass
                     
                 elif ctx.qmethod[1:] == ('tensor', 'tensor'):
-                    grad_feature = (grad_lut_dx[index] - zero_weight) * scale_weight
-                    grad_feature = torch.einsum('mn, mkn -> mk', upstream_grad, grad_feature)
-                    # grad_feature shape (BL, CKK)
+                    grad_feature, grad_weight = at.approx_gemm.ops.gemm_custom_grad_uint8_tt(mat_feature, mat_weight, upstream_grad, grad_lut_dx, grad_lut_dy, scale_feature, zero_feature, scale_weight, zero_weight)
+                    # grad_feature shape (BL, CKK), grad_weight shape (CKK, O)
                     grad_feature = grad_feature.view(B, L, C*Kh*Kw).transpose(1, 2).contiguous()
-                    # (B, CKK, L)
                     grad_feature = torch.nn.functional.fold(grad_feature, (H, W), 
                                 kernel_size=(Kh, Kw), padding=ctx.padding, 
                                 stride=ctx.stride, dilation=ctx.dilation)
-                    # (B, C, H, W)
-                    
-                    grad_weight = (grad_lut_dy[index] - zero_feature) * scale_feature
-                    grad_weight = torch.einsum('mn, mkn -> kn', upstream_grad, grad_weight)
-                    del index
-                    # grad_weight shape (CKK, O)
                     grad_weight = grad_weight.transpose(0, 1).contiguous().view(O, C, Kh, Kw)
+                    
             case _:
                 raise ValueError(f"Invalid gradient method: {ctx.grad}")
             
