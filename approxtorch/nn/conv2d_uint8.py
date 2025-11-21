@@ -67,6 +67,7 @@ class _conv2d_uint8(Function):
         weight = weight.view(O, -1) # (O, CKK)
         weight = weight.transpose(1, 0).contiguous() # (CKK, O)
         # feature is (B*L, CKK) and weight shape is (CKK, O)
+        
         feature = feature.to(torch.uint8)
         weight = weight.to(torch.uint8)
         
@@ -78,7 +79,12 @@ class _conv2d_uint8(Function):
                 ctx.output_shape = (B, O, OH, OW)
                 ctx.save_for_backward(feature, weight, scale_feature, scale_weight, zero_feature, \
                     zero_weight, grad_data[0], grad_data[1])
-            
+            case 'spsa':
+                ctx.qmethod = qmethod
+                ctx.feature_shape = (B, C, H, W)
+                ctx.weight_shape = (O, C, Kh, Kw)
+                ctx.output_shape = (B, O, OH, OW)
+                ctx.save_for_backward(feature, weight, scale_feature, scale_weight, zero_feature, zero_weight, lut)
             
         ctx.has_bias = bias is not None
         ctx.grad = grad
@@ -89,7 +95,7 @@ class _conv2d_uint8(Function):
         # 3. approximate gemm  # test phase
         output = at.approx_gemm.ops.gemm_uint8(feature, weight, lut).to(torch.float)
         # the output shape is (BL, O)
-        
+                
         # 4. de-quantize
         match qmethod:
             case (_, 'tensor', 'tensor'):
@@ -195,6 +201,43 @@ class _conv2d_uint8(Function):
                                 stride=ctx.stride, dilation=ctx.dilation)
                     grad_weight = grad_weight.transpose(0, 1).contiguous().view(O, C, Kh, Kw)
                     
+            case 'spsa':
+                (B, C, H, W) = ctx.feature_shape
+                (O, C, Kh, Kw) = ctx.weight_shape
+                (B, O, OH, OW) = ctx.output_shape
+                L = OH * OW
+                mat_feature, mat_weight, scale_feature, scale_weight, zero_feature, zero_weight, lut = ctx.saved_tensors
+                upstream_grad = upstream_grad.view(B, O, L).transpose(1,2).contiguous().view(B*L, O) # (BL, O)
+                # epsilon = 2
+                epsilon = 2
+                rand_bits = torch.randint(0, 2, mat_feature.shape, device=mat_feature.device, dtype=torch.int)
+                z = rand_bits * 2 - 1
+
+                mat_feature_plus = mat_feature + epsilon * z
+                mat_feature_minus = mat_feature - epsilon * z
+                delta_feature = (mat_feature_plus - mat_feature_minus).to(torch.float)
+                Y_pos = at.approx_gemm.ops.gemm_uint8(mat_feature_plus, mat_weight, lut).to(torch.float)
+                Y_minus = at.approx_gemm.ops.gemm_uint8(mat_feature_minus, mat_weight, lut).to(torch.float)
+                grad_feature = upstream_grad * (Y_pos - Y_minus)
+                grad_feature = grad_feature.sum(dim=1, keepdim=True)
+                grad_feature = grad_feature * scale_weight * delta_feature - (upstream_grad * zero_weight).sum(dim=1, keepdim=True)
+                grad_feature = grad_feature.view(B, L, C*Kh*Kw).transpose(1, 2).contiguous()
+                grad_feature = torch.nn.functional.fold(grad_feature, (H, W), 
+                                kernel_size=(Kh, Kw), padding=ctx.padding, 
+                                stride=ctx.stride, dilation=ctx.dilation)
+                
+                mat_weight_plus = mat_weight + epsilon * z
+                mat_weight_minus = mat_weight - epsilon * z
+                delta_weight = (mat_weight_plus - mat_weight_minus).to(torch.float)   # (CKK, O)
+                Y_pos = at.approx_gemm.ops.gemm_uint8(mat_feature, mat_weight_plus, lut).to(torch.float)
+                Y_minus = at.approx_gemm.ops.gemm_uint8(mat_feature, mat_weight_minus, lut).to(torch.float)
+                grad_weight = upstream_grad * (Y_pos - Y_minus)   # (BL, O)
+                grad_weight = grad_weight.sum(dim=0, keepdim=True) # (1, O)
+                #                                                           (BL, O)         
+                grad_weight = grad_weight * scale_feature * delta_weight - (upstream_grad * zero_feature).sum(dim=0, keepdim=True)
+                # grad weight (CKK, O)
+                grad_weight = grad_weight.transpose(0, 1).contiguous().view(O, C, Kh, Kw)
+                
             case _:
                 raise ValueError(f"Invalid gradient method: {ctx.grad}")
             
