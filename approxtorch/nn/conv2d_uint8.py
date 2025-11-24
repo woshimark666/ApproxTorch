@@ -89,7 +89,9 @@ class _conv2d_uint8(Function):
         # 3. approximate gemm  # test phase
         output = at.approx_gemm.ops.gemm_uint8(feature, weight, lut).to(torch.float)
         # the output shape is (BL, O)
-                
+        
+        feature = feature.to(torch.float)
+        weight = weight.to(torch.float)
         # 4. de-quantize
         match qmethod:
             case (_, 'tensor', 'tensor'):
@@ -101,7 +103,7 @@ class _conv2d_uint8(Function):
                 output = output - zero_feature * weight.sum(dim=0, keepdim=True) - \
                             zero_weight.unsqueeze(0) * feature.sum(dim=1, keepdim=True) + \
                                 C*Kh*Kw*zero_feature*zero_weight
-                output = output * scale_feature * scale_weight.view(1, -1, 1, 1)
+                output = output * scale_feature * scale_weight.view(1, -1)
             case _:
                 raise ValueError(f"Invalid quantization method: {qmethod}")
         
