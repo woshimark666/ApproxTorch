@@ -291,7 +291,8 @@ __global__ void grad_feature_uint8_tc_kernel(
     const uint8_t* __restrict__ mat_weight,    // Input: (O, CKK)  -> 用于计算索引
     const float* __restrict__ grad_output, // Input: (BL, O), upstream gradient
     const float* __restrict__ lut_dx,      // LUT of df(x,y) / dx, one dimension
-    float scale_w, float zero_w,           // scale and zero of weight,
+    const float* __restrict__ scale_w, // (O,)
+    const float* __restrict__ zero_w,  // scale and zero of weight, shape is (O,)
     uint M, uint N, uint K)                   // M=BL, N=O, K=CKK
 {
     // Block索引
@@ -315,6 +316,11 @@ __global__ void grad_feature_uint8_tc_kernel(
     __shared__ float ds_grad_out[TILE_DIM][TILE_DIM];
     __shared__ uint8_t   ds_weight[TILE_DIM][TILE_DIM];
 
+    // [新增] 1. 增加 Shared Memory 来存当前 Tile 的 Scale 和 Zero
+    // 因为是 Per-Channel，只需要存 N 维度的 TILE_DIM 个值
+    __shared__ float ds_scale[TILE_DIM];
+    __shared__ float ds_zero[TILE_DIM];
+    
     // 既然我们要计算 grad_feature[row, col]，我们需要用到 mat_feature[row, col]
     // 这个值对于内部的循环是不变的，我们可以提前加载到寄存器
     uint my_feat_val = 0;
@@ -349,6 +355,19 @@ __global__ void grad_feature_uint8_tc_kernel(
         } else {
              ds_weight[ty][tx] = 0;  // Padding
         }
+        
+        // [新增] 2. 加载 scale_w 和 zero_w 到 Shared Memory
+        // scale_w 是一维向量，长度为 N。当前 Tile 对应的 N 索引范围是 [t*TILE, t*TILE + TILE]
+        // 我们只需要利用 block 内的一行线程 (例如 ty==0) 来加载即可
+        if (ty == 0) {
+            if (tiled_n_idx < N) { // tiled_n_idx = t * TILE + tx
+                ds_scale[tx] = scale_w[tiled_n_idx];
+                ds_zero[tx]  = zero_w[tiled_n_idx];
+            } else {
+                ds_scale[tx] = 1.0f; // Padding: 防止计算出 NaN/Inf，虽然后面 grad=0 也会抵消
+                ds_zero[tx]  = 0.0f;
+            }
+        }
 
         __syncthreads();
 
@@ -382,7 +401,9 @@ __global__ void grad_feature_uint8_tc_kernel(
             
             // 查表 + 变换
             float lut_val = fetch_grad(idx, lut_dx);
-            float deriv = (lut_val - zero_w) * scale_w;
+            float current_scale = ds_scale[k];
+            float current_zero  = ds_zero[k];
+            float deriv = (lut_val - current_zero) * current_scale;
 
             acc += g_val * deriv;
         }
@@ -425,12 +446,12 @@ gemm_custom_grad_uint8_tc(const torch::Tensor& A, const torch::Tensor& B,
         (CKK + TILE_DIM - 1) / TILE_DIM,
         (BL + TILE_DIM - 1) / TILE_DIM);
 
-    grad_feature_uint8_tt_kernel<<<grid_feature, block, 0>>>
+    grad_feature_uint8_tc_kernel<<<grid_feature, block, 0>>>
     (grad_A.data_ptr<float>(), 
         A.data_ptr<uint8_t>(), B.data_ptr<uint8_t>(), 
         upstream_grad.data_ptr<float>(), 
         grad_lut_dx.data_ptr<float>(), 
-        scale_B_f, zero_B_f, BL, O, CKK);
+        scale_B.data_ptr<float>(), zero_B.data_ptr<float>(), BL, O, CKK);
     cudaDeviceSynchronize();
 
     dim3 grid_weight(
@@ -455,10 +476,12 @@ gemm_custom_grad_uint8_tc(const torch::Tensor& A, const torch::Tensor& B,
 
 TORCH_LIBRARY_FRAGMENT(approxtorch, m){
     m.def("gemm_custom_grad_uint8_tt(Tensor A, Tensor B, Tensor upstream_grad, Tensor grad_lut_dx, Tensor grad_lut_dy, Tensor scale_A, Tensor zero_A, Tensor scale_B, Tensor zero_B) -> (Tensor, Tensor)");
+    m.def("gemm_custom_grad_uint8_tc(Tensor A, Tensor B, Tensor upstream_grad, Tensor grad_lut_dx, Tensor grad_lut_dy, Tensor scale_A, Tensor zero_A, Tensor scale_B, Tensor zero_B) -> (Tensor, Tensor)");
 }
 
 TORCH_LIBRARY_IMPL(approxtorch, CUDA, m){
     m.impl("gemm_custom_grad_uint8_tt", &gemm_custom_grad_uint8_tt);
+    m.impl("gemm_custom_grad_uint8_tc", &gemm_custom_grad_uint8_tc);
 }
 
 }
