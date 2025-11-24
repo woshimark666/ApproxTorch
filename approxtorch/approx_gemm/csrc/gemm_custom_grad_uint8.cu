@@ -320,7 +320,7 @@ __global__ void grad_feature_uint8_tc_kernel(
     // 因为是 Per-Channel，只需要存 N 维度的 TILE_DIM 个值
     __shared__ float ds_scale[TILE_DIM];
     __shared__ float ds_zero[TILE_DIM];
-    
+
     // 既然我们要计算 grad_feature[row, col]，我们需要用到 mat_feature[row, col]
     // 这个值对于内部的循环是不变的，我们可以提前加载到寄存器
     uint my_feat_val = 0;
@@ -437,8 +437,7 @@ gemm_custom_grad_uint8_tc(const torch::Tensor& A, const torch::Tensor& B,
 
     float scale_A_f = scale_A.item<float>();
     float zero_A_f = zero_A.item<float>();
-    float scale_B_f = scale_B.item<float>();
-    float zero_B_f = zero_B.item<float>();
+
 
 
     const dim3 block(TILE_DIM, TILE_DIM);
@@ -446,13 +445,12 @@ gemm_custom_grad_uint8_tc(const torch::Tensor& A, const torch::Tensor& B,
         (CKK + TILE_DIM - 1) / TILE_DIM,
         (BL + TILE_DIM - 1) / TILE_DIM);
 
-    grad_feature_uint8_tc_kernel<<<grid_feature, block, 0>>>
+    grad_feature_uint8_tc_kernel<<<grid_feature, block, 0, at::cuda::getCurrentCUDAStream()>>>
     (grad_A.data_ptr<float>(), 
         A.data_ptr<uint8_t>(), B.data_ptr<uint8_t>(), 
         upstream_grad.data_ptr<float>(), 
         grad_lut_dx.data_ptr<float>(), 
         scale_B.data_ptr<float>(), zero_B.data_ptr<float>(), BL, O, CKK);
-    cudaDeviceSynchronize();
 
     dim3 grid_weight(
         (O + TILE_DIM - 1) / TILE_DIM,
