@@ -12,7 +12,7 @@ from . import nn
 from . import approx_gemm
 
 # load LUT utils
-from .load_lut import load_lut, load_lre_grad_lut, load_custom_grad_lut
+from .load_lut import load_lut, load_lre_grad_lut, load_custom_grad_lut, load_half_custom_grad_lut
 
 # convert model helper ultils
 from .convert_model import convert_model
