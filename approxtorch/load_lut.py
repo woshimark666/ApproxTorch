@@ -71,3 +71,11 @@ def load_custom_grad_lut(file_path):
         grad_a = grad_a.view(-1)
         grad_b = grad_b.view(-1)
         return grad_a, grad_b
+    
+def load_half_custom_grad_lut(file_path):
+    # dL/dx use STE
+    # only need dL/dw grad lut
+    grad_lut_dy = np.loadtxt(file_path, dtype=np.float32)
+    grad_lut_dy = torch.tensor(grad_lut_dy)
+    grad_lut_dy = grad_lut_dy.view(-1)
+    return (None, grad_lut_dy)
