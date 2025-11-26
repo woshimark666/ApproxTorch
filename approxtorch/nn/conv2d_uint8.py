@@ -41,35 +41,35 @@ class _conv2d_uint8(Function):
         # 1. quantization 
         match qmethod:
             case ('dynamic', 'tensor', 'tensor'):
-                feature, scale_feature, zero_feature = Q.quantize_dynamic_uint8_per_tensor(feature)
-                weight, scale_weight, zero_weight = Q.quantize_dynamic_uint8_per_tensor(weight)
+                qfeature, scale_feature, zero_feature = Q.quantize_dynamic_uint8_per_tensor(feature)
+                qweight, scale_weight, zero_weight = Q.quantize_dynamic_uint8_per_tensor(weight)
             case ('dynamic', 'tensor', 'channel'):
-                feature, scale_feature, zero_feature = Q.quantize_dynamic_uint8_per_tensor(feature)
-                weight, scale_weight, zero_weight = Q.quantize_dynamic_uint8_per_channel(weight)
+                qfeature, scale_feature, zero_feature = Q.quantize_dynamic_uint8_per_tensor(feature)
+                qweight, scale_weight, zero_weight = Q.quantize_dynamic_uint8_per_channel(weight)
             case ('static', 'tensor', 'tensor'):
                 if scale_feature is not None and zero_feature is not None and scale_weight is not None and zero_weight is not None:
-                    feature = Q.quantize_static_uint8_per_tensor(feature, scale_feature, zero_feature)
-                    weight = Q.quantize_static_uint8_per_tensor(weight, scale_weight, zero_weight)
+                    qfeature = Q.quantize_static_uint8_per_tensor(feature, scale_feature, zero_feature)
+                    qweight = Q.quantize_static_uint8_per_tensor(weight, scale_weight, zero_weight)
                 else:
                     raise ValueError("scale or zero point is not provided")
             case ('static', 'tensor', 'channel'):
                 if scale_feature is not None and zero_feature is not None and scale_weight is not None and zero_weight is not None:
-                    feature = Q.quantize_static_uint8_per_tensor(feature, scale_feature, zero_feature)
-                    weight = Q.quantize_static_uint8_per_channel(weight, scale_weight, zero_weight)
+                    qfeature = Q.quantize_static_uint8_per_tensor(feature, scale_feature, zero_feature)
+                    qweight = Q.quantize_static_uint8_per_channel(weight, scale_weight, zero_weight)
                 else:
                     raise ValueError("scale or zero point is not provided")
             case _:
                 raise ValueError(f"Invalid quantization method: {qmethod}")
         
         # 2. im2col
-        feature = F.unfold(feature, (Kh, Kw), stride=stride, padding=padding, dilation=dilation) # (B, CKK, L)
-        feature = feature.transpose(1, 2).contiguous().view(-1, C*Kh*Kw) # (B*L, CKK)
-        weight = weight.view(O, -1) # (O, CKK)
-        weight = weight.transpose(1, 0).contiguous() # (CKK, O)
+        qfeature = F.unfold(qfeature, (Kh, Kw), stride=stride, padding=padding, dilation=dilation) # (B, CKK, L)
+        qfeature = qfeature.transpose(1, 2).contiguous().view(-1, C*Kh*Kw) # (B*L, CKK)
+        qweight = qweight.view(O, -1) # (O, CKK)
+        qweight = qweight.transpose(1, 0).contiguous() # (CKK, O)
         # feature is (B*L, CKK) and weight shape is (CKK, O)
         
-        feature = feature.to(torch.uint8)
-        weight = weight.to(torch.uint8)
+        qfeature = qfeature.to(torch.uint8)
+        qweight = qweight.to(torch.uint8)
         
         match grad:
             case 'lre' | 'custom':
@@ -77,9 +77,16 @@ class _conv2d_uint8(Function):
                 ctx.feature_shape = (B, C, H, W)
                 ctx.weight_shape = (O, C, Kh, Kw)
                 ctx.output_shape = (B, O, OH, OW)
-                ctx.save_for_backward(feature, weight, scale_feature, scale_weight, zero_feature, \
+                ctx.save_for_backward(qfeature, qweight, scale_feature, scale_weight, zero_feature, \
                     zero_weight, grad_data[0], grad_data[1])
             
+            case 'half_cutsom':
+                ctx.qmethod = qmethod
+                ctx.feature_shape = (B, C, H, W)
+                ctx.weight_shape = (O, C, Kh, Kw)
+                ctx.output_shape = (B, O, OH, OW)
+                ctx.save_for_backward(weight, qfeature, qweight, scale_feature, zero_feature, grad_data[1])
+                
         ctx.has_bias = bias is not None
         ctx.grad = grad
         ctx.stride = stride
@@ -87,21 +94,21 @@ class _conv2d_uint8(Function):
         ctx.dilation = dilation
         ctx.groups = groups
         # 3. approximate gemm  # test phase
-        output = at.approx_gemm.ops.gemm_uint8(feature, weight, lut).to(torch.float)
+        output = at.approx_gemm.ops.gemm_uint8(qfeature, qweight, lut).to(torch.float)
         # the output shape is (BL, O)
         
-        feature = feature.to(torch.float)
-        weight = weight.to(torch.float)
+        qfeature = qfeature.to(torch.float)
+        qweight = qweight.to(torch.float)
         # 4. de-quantize
         match qmethod:
             case (_, 'tensor', 'tensor'):
-                output = output - zero_feature * weight.sum(dim=0, keepdim=True) - \
-                            zero_weight * feature.sum(dim=1, keepdim=True) + \
+                output = output - zero_feature * qweight.sum(dim=0, keepdim=True) - \
+                            zero_weight * qfeature.sum(dim=1, keepdim=True) + \
                                 C*Kh*Kw*zero_feature*zero_weight
                 output = output * scale_feature * scale_weight    
             case (_, 'tensor', 'channel'):
-                output = output - zero_feature * weight.sum(dim=0, keepdim=True) - \
-                            zero_weight.unsqueeze(0) * feature.sum(dim=1, keepdim=True) + \
+                output = output - zero_feature * qweight.sum(dim=0, keepdim=True) - \
+                            zero_weight.unsqueeze(0) * qfeature.sum(dim=1, keepdim=True) + \
                                 C*Kh*Kw*zero_feature*zero_weight
                 output = output * scale_feature * scale_weight.view(1, -1)
             case _:
@@ -201,7 +208,23 @@ class _conv2d_uint8(Function):
                                 kernel_size=(Kh, Kw), padding=ctx.padding, 
                                 stride=ctx.stride, dilation=ctx.dilation)
                     grad_weight = grad_weight.transpose(0, 1).contiguous().view(O, C, Kh, Kw)
-                    
+            
+            case 'half_custom':
+                (B, C, H, W) = ctx.feature_shape
+                (O, C, Kh, Kw) = ctx.weight_shape
+                (B, O, OH, OW) = ctx.output_shape
+                L = OH * OW
+                weight, qfeature, qweight, scale_feature, zero_feature, grad_lut_dy = ctx.saved_tensors
+                
+                # use ste to compute dL/dx
+                grad_feature = torch.nn.grad.conv2d_input(ctx.feature_shape, weight, upstream_grad, stride=ctx.stride, padding=ctx.padding, dilation=ctx.dilation)
+                
+                # use custom gradient to compute dL/dw
+                upstream_grad = upstream_grad.view(B, O, L).transpose(1,2).contiguous().view(B*L, O) # (BL, O)
+                grad_weight = at.approx_gemm.ops.gemm_custom_grad_uint8_dw_only(qfeature, qweight, upstream_grad, \
+                    grad_lut_dy, scale_feature, zero_feature)
+                grad_weight = grad_weight.transpose(0, 1).contiguous().view(O, C, Kh, Kw)
+                
             case _:
                 raise ValueError(f"Invalid gradient method: {ctx.grad}")
             

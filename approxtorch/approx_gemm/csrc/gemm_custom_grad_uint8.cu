@@ -472,14 +472,59 @@ gemm_custom_grad_uint8_tc(const torch::Tensor& A, const torch::Tensor& B,
 }
 
 
+// A input, B weight
+torch::Tensor 
+gemm_custom_grad_uint8_dw_only(const torch::Tensor& A, const torch::Tensor& B,
+                const torch::Tensor& upstream_grad,
+                const torch::Tensor& grad_lut_dy,
+                const torch::Tensor& scale_A, const torch::Tensor& zero_A)
+{
+    const at::cuda::OptionalCUDAGuard device_guard(device_of(A));
+
+    uint BL = A.size(0);
+    uint CKK = A.size(1);
+    uint O = B.size(1); 
+
+    auto options = torch::TensorOptions().dtype(torch::kFloat).device(A.device());
+    torch::Tensor grad_B = torch::zeros({CKK, O}, options);
+
+
+
+    float scale_A_f = scale_A.item<float>();
+    float zero_A_f = zero_A.item<float>();
+
+
+
+    const dim3 block(TILE_DIM, TILE_DIM);
+    dim3 grid_weight(
+        (O + TILE_DIM - 1) / TILE_DIM,
+        (CKK + TILE_DIM - 1) / TILE_DIM);
+
+    grad_weight_uint8_tt_kernel<<<grid_weight, block, 0, at::cuda::getCurrentCUDAStream()>>>
+    (grad_B.data_ptr<float>(), 
+        A.data_ptr<uint8_t>(), B.data_ptr<uint8_t>(), 
+        upstream_grad.data_ptr<float>(), 
+        grad_lut_dy.data_ptr<float>(), scale_A_f, zero_A_f, CKK, O, BL);
+
+    // check for errors
+    cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        printf("CUDA error: %s\n", cudaGetErrorString(error));
+    }
+
+    return grad_B;
+}
+
 TORCH_LIBRARY_FRAGMENT(approxtorch, m){
     m.def("gemm_custom_grad_uint8_tt(Tensor A, Tensor B, Tensor upstream_grad, Tensor grad_lut_dx, Tensor grad_lut_dy, Tensor scale_A, Tensor zero_A, Tensor scale_B, Tensor zero_B) -> (Tensor, Tensor)");
     m.def("gemm_custom_grad_uint8_tc(Tensor A, Tensor B, Tensor upstream_grad, Tensor grad_lut_dx, Tensor grad_lut_dy, Tensor scale_A, Tensor zero_A, Tensor scale_B, Tensor zero_B) -> (Tensor, Tensor)");
+    m.def("gemm_custom_grad_uint8_dw_only(Tensor A, Tensor B, Tensor upstream_grad, Tensor grad_lut_dy, Tensor scale_A, Tensor zero_A) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(approxtorch, CUDA, m){
     m.impl("gemm_custom_grad_uint8_tt", &gemm_custom_grad_uint8_tt);
     m.impl("gemm_custom_grad_uint8_tc", &gemm_custom_grad_uint8_tc);
+    m.impl("gemm_custom_grad_uint8_dw_only", &gemm_custom_grad_uint8_dw_only);
 }
 
 }
