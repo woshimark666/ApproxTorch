@@ -55,7 +55,7 @@ class Conv2d_uint8(torch.nn.Module):
         match grad:
             case "ste":
                 self.grad_data = None
-            case 'lre' | 'custom':
+            case 'lre' | 'custom' | 'half_custom':
                 self.grad_lut_dx = torch.nn.Parameter(grad_data[0], requires_grad=False)
                 self.grad_lut_dy = torch.nn.Parameter(grad_data[1], requires_grad=False)
                 self.grad_data = (self.grad_lut_dx, self.grad_lut_dy)

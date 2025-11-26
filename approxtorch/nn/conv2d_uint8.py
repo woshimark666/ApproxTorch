@@ -80,7 +80,7 @@ class _conv2d_uint8(Function):
                 ctx.save_for_backward(qfeature, qweight, scale_feature, scale_weight, zero_feature, \
                     zero_weight, grad_data[0], grad_data[1])
             
-            case 'half_cutsom':
+            case 'half_custom':
                 ctx.qmethod = qmethod
                 ctx.feature_shape = (B, C, H, W)
                 ctx.weight_shape = (O, C, Kh, Kw)
