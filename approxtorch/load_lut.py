@@ -78,4 +78,5 @@ def load_half_custom_grad_lut(file_path):
     grad_lut_dy = np.loadtxt(file_path, dtype=np.float32)
     grad_lut_dy = torch.tensor(grad_lut_dy)
     grad_lut_dy = grad_lut_dy.view(-1)
-    return (None, grad_lut_dy)
+    
+    return grad_lut_dy

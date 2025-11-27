@@ -85,7 +85,7 @@ class _conv2d_uint8(Function):
                 ctx.feature_shape = (B, C, H, W)
                 ctx.weight_shape = (O, C, Kh, Kw)
                 ctx.output_shape = (B, O, OH, OW)
-                ctx.save_for_backward(weight, qfeature, qweight, scale_feature, zero_feature, grad_data[1])
+                ctx.save_for_backward(weight, qfeature, qweight, scale_feature, zero_feature, grad_data)
                 
         ctx.has_bias = bias is not None
         ctx.grad = grad

@@ -60,8 +60,8 @@ class Conv2d_uint8(torch.nn.Module):
                 self.grad_lut_dy = torch.nn.Parameter(grad_data[1], requires_grad=False)
                 self.grad_data = (self.grad_lut_dx, self.grad_lut_dy)
             case 'half_custom':
-                self.grad_lut_dy = torch.nn.Parameter(grad_data[1], requires_grad=False)
-                self.grad_data = (None, self.grad_lut_dy)
+                self.grad_lut_dy = torch.nn.Parameter(grad_data, requires_grad=False)
+                self.grad_data = self.grad_lut_dy
             case _:
                 raise ValueError("Invalid gradient method")
         
