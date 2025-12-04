@@ -51,6 +51,6 @@ def generate_socc_lre_grad(multiplier, qtype, save_path):
                 grad_lut[x, 1] = slope
     
     
-    np.savetxt(save_path, grad_lut, fmt='%.4f')
+    np.savetxt(save_path, grad_lut)
     return grad_lut
 
