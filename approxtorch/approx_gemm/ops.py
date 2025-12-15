@@ -61,3 +61,21 @@ def gemm_custom_grad_uint8_tc(A: Tensor, B: Tensor, upstream_grad: Tensor, grad_
 
 def gemm_custom_grad_uint8_dw_only(A: Tensor, B: Tensor, upstream_grad: Tensor, grad_lut_dy: Tensor, scale_A: Tensor, zero_A: Tensor) -> Tensor:
     return torch.ops.approxtorch.gemm_custom_grad_uint8_dw_only.default(A, B, upstream_grad, grad_lut_dy, scale_A, zero_A)
+
+
+
+
+def approx_batch_gemm_uint8(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
+    return torch.ops.approxtorch.approx_batch_gemm_uint8.default(A, B, lut)
+
+
+def approx_gemm_uint8(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
+    return torch.ops.approxtorch.approx_gemm_uint8.default(A, B, lut)
+
+
+def approx_implicit_gemm_uint8(feature: Tensor, weight: Tensor, lut: Tensor, pad_h: int, pad_w: int, stride_h: int, stride_w: int, dilation_h: int, dilation_w: int) -> Tensor:
+    return torch.ops.approxtorch.approx_implicit_gemm_uint8.default(feature, weight, lut, pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w)
+
+
+def im2col_uint8(feature: Tensor, k_h: int, k_w: int, pad_h: int, pad_w: int, stride_h: int, stride_w: int, dil_h: int, dil_w: int) -> Tensor:
+    return torch.ops.approxtorch.im2col_uint8.default(feature, k_h, k_w, pad_h, pad_w, stride_h, stride_w, dil_h, dil_w)

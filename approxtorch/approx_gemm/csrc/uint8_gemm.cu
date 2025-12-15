@@ -31,13 +31,21 @@ __global__ void apgemm_2d_thread_tiling_matrix_transposed_uint8_kernel_small(int
         );
         __syncthreads();
 
+        // 1. 计算当前 Block Tile 在 K 维度上的全局起始位置
+        size_t current_tile_k_start = thread_block_tile_idx * BK;
 #pragma unroll
         for (size_t k_i = 0; k_i < BK; ++k_i)
         {
+
+            // 3. 【关键】判断当前这一行/列是否是真的数据
+            // 如果 current_tile_k_start + k_i >= K，说明这是 Padding 出来的区域
+            bool is_valid_k = (current_tile_k_start + k_i) < K;
+
             size_t const A_thread_block_tile_row_idx = 
                     thread_linear_idx / (BN / TN) * TM;
             size_t const A_thread_block_tile_col_idx = k_i;
 
+            // 读取到 A_vals register
 #pragma unroll
             for (size_t thread_tile_row_idx = 0; 
                     thread_tile_row_idx < TM; ++thread_tile_row_idx)
@@ -49,6 +57,8 @@ __global__ void apgemm_2d_thread_tiling_matrix_transposed_uint8_kernel_small(int
             size_t const B_thread_block_tile_row_idx = k_i;
             size_t const B_thread_block_tile_col_idx = 
                         thread_linear_idx % (BN / TN) * TN;
+            
+            // 读取到 B_vals register
 #pragma unroll
             for (size_t thread_tile_col_idx = 0; 
                     thread_tile_col_idx < TN; ++thread_tile_col_idx)
@@ -56,16 +66,20 @@ __global__ void apgemm_2d_thread_tiling_matrix_transposed_uint8_kernel_small(int
                 B_vals[thread_tile_col_idx] = 
                     Bs[B_thread_block_tile_row_idx][B_thread_block_tile_col_idx + thread_tile_col_idx];
             }
-
-            for (size_t thread_tile_row_idx = 0; 
-                    thread_tile_row_idx < TM; ++thread_tile_row_idx)
+            // --- 计算部分 (增加屏蔽判断) ---
+            // 只有当 K 维度有效时，才进行累加
+            if (is_valid_k)
             {
-                for (size_t thread_tile_col_idx = 0; 
-                        thread_tile_col_idx < TN; ++thread_tile_col_idx)
+                for (size_t thread_tile_row_idx = 0; 
+                        thread_tile_row_idx < TM; ++thread_tile_row_idx)
                 {
-                    
-                    uint const lut_idx = 256 * A_vals[thread_tile_row_idx] + B_vals[thread_tile_col_idx];
-                    C_thread_results[thread_tile_row_idx][thread_tile_col_idx] +=  lut[lut_idx];   
+                    for (size_t thread_tile_col_idx = 0; 
+                            thread_tile_col_idx < TN; ++thread_tile_col_idx)
+                    {
+                        
+                        uint const lut_idx = 256 * A_vals[thread_tile_row_idx] + B_vals[thread_tile_col_idx];
+                        C_thread_results[thread_tile_row_idx][thread_tile_col_idx] +=  lut[lut_idx];   
+                    }
                 }
             }
         }
