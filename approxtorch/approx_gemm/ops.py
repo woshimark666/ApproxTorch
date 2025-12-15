@@ -65,8 +65,8 @@ def gemm_custom_grad_uint8_dw_only(A: Tensor, B: Tensor, upstream_grad: Tensor, 
 
 
 
-def approx_batch_gemm_uint8(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
-    return torch.ops.approxtorch.approx_batch_gemm_uint8.default(A, B, lut)
+def approx_bgemm_uint8(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
+    return torch.ops.approxtorch.approx_bgemm_uint8.default(A, B, lut)
 
 
 def approx_gemm_uint8(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:

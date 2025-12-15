@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from approxtorch.nn import Conv2d_int8, Conv2d_uint8
+from approxtorch.new_nn import Conv2d_uint8_STE, Conv2d_uint8_custom 
 from typing import Literal
 
 # this function convert the model into approximate model
@@ -99,6 +100,89 @@ def convert_model(model,
         #     if bias is not None:
         #         new_module.bias.data.copy_(module.bias.data)
         #     modules_to_replace.append((name, new_module))
+        
+    for name, new_module in modules_to_replace:
+        parent_name, attr_name = name.rsplit('.', 1) if '.' in name else ('', name)
+        parent_module = dict(model.named_modules())[parent_name] if parent_name else model
+        setattr(parent_module, attr_name, new_module)
+        
+    return model
+
+
+
+def new_convert_model(model, 
+                lut,
+                qtype: str = 'int8',
+                qmethod: tuple[str, str, str] = ('dynamic', 'tensor', 'tensor'),
+                grad: str = 'ste',
+                grad_data = None, 
+                conv_only = True,
+                ignore_first_conv = True
+            ):
+    
+    modules_to_replace = []
+    conv2d_count = 0 
+
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Conv2d):
+            conv2d_count += 1
+            if ignore_first_conv and conv2d_count == 1:
+                continue  # 跳过第一个Conv2d层
+            
+            # collect the Conv2d parameters
+            in_channels = module.in_channels
+            out_channels = module.out_channels
+            kernel_size = module.kernel_size
+            stride = module.stride
+            padding = module.padding
+            dilation = module.dilation
+            bias = module.bias
+            groups = module.groups
+            
+            scale_feature, zero_feature, scale_weight, zero_weight = None, None, None, None
+            match (qtype, qmethod):
+                
+                case (_, ('dynamic', _, _)):
+                    pass
+                
+                case ('uint8', ('static', 'tensor', 'tensor')):
+                    scale_feature = torch.randn(())
+                    zero_feature = torch.randn(())
+                    scale_weight = torch.randn(())
+                    zero_weight = torch.randn(())
+                case ('uint8', ('static', 'tensor', 'channel')):
+                    scale_feature = torch.randn(())
+                    zero_feature = torch.randn(())
+                    scale_weight = torch.randn(out_channels)
+                    zero_weight = torch.randn(out_channels)
+                case ('int8', ('static', 'tensor', 'tensor')):
+                    scale_feature = torch.randn(())
+                    scale_weight = torch.randn(())
+                case ('int8', ('static', 'tensor', 'channel')):
+                    scale_feature = torch.randn(())
+                    scale_weight = torch.randn(out_channels)
+                case _:
+                    raise ValueError("Invalid qmethod")
+            
+            new_module = None
+            # check if this model is Normal Conv2d or Depthwise_Conv2d
+            match (qtype, grad): 
+                case ('uint8', 'ste'):
+                    new_module = Conv2d_uint8_STE(
+                        in_channels, out_channels, kernel_size, lut, qmethod, scale_feature, zero_feature, scale_weight, zero_weight, bias, stride, padding, dilation, groups
+                    )
+                    
+                case ('uint8', 'custom'):
+                    new_module = Conv2d_uint8_custom(
+                        in_channels, out_channels, kernel_size, lut, qmethod, scale_feature, zero_feature, scale_weight, zero_weight, bias, stride, padding, dilation, groups
+                    )
+                    
+                # TODO: add int8 support 
+                case _:
+                    raise ValueError("Invalid qtype")
+                
+            modules_to_replace.append((name, new_module))
+ 
         
     for name, new_module in modules_to_replace:
         parent_name, attr_name = name.rsplit('.', 1) if '.' in name else ('', name)
