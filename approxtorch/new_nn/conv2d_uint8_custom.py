@@ -90,7 +90,8 @@ class _conv2d_uint8_custom(Function):
                 # we set the zero_W to be 0.
                 # then the whole equation is much eaiser.
                 term1 = zero_feature * qweight.sum(dim=(1)).view(1, -1, 1, 1)
-                output = output - term1
+                term2 = (qfeature.sum(dim=(1), keepdim=True) * zero_weight).view(B, -1, OH, OW)
+                output = output - term1 - term2 + C*Kh*Kw*zero_feature*zero_weight
                 output = output * scale_feature * scale_weight 
             case (_, 'tensor', 'channel'):
                 pass 

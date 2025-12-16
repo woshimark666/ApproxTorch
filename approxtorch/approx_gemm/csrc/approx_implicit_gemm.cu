@@ -238,23 +238,23 @@ torch::Tensor implicit_gemm_uint8(
     int64_t dilation_h, int64_t dilation_w
 ){
 
-    constexpr int BM = 128;
-    constexpr int BN = 128;
-    constexpr int BK = 32;
-    constexpr int WM = 64;
-    constexpr int WN = 32;
-    constexpr int TM = 8;
-    constexpr int TN = 8;
-    constexpr int NUM_THREADS = 256;
-
-    // constexpr int BM = 64;
-    // constexpr int BN = 64;
-    // constexpr int BK = 64;
-    // constexpr int WM = 32;
-    // constexpr int WN = 16;
-    // constexpr int TM = 4;
-    // constexpr int TN = 4;
+    // constexpr int BM = 128;
+    // constexpr int BN = 128;
+    // constexpr int BK = 32;
+    // constexpr int WM = 64;
+    // constexpr int WN = 32;
+    // constexpr int TM = 8;
+    // constexpr int TN = 8;
     // constexpr int NUM_THREADS = 256;
+
+    constexpr int BM = 64;
+    constexpr int BN = 64;
+    constexpr int BK = 64;
+    constexpr int WM = 32;
+    constexpr int WN = 16;
+    constexpr int TM = 4;
+    constexpr int TN = 4;
+    constexpr int NUM_THREADS = 256;
 
 
     const at::cuda::OptionalCUDAGuard device_guard(device_of(feature));

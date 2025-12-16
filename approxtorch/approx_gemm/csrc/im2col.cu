@@ -109,12 +109,49 @@ torch::Tensor im2col_uint8(
 
     return feature_col;
 }
+
+
+
+torch::Tensor im2col_int8(
+    const torch::Tensor& feature, 
+    int64_t k_h, int64_t k_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t stride_h, int64_t stride_w,
+    int64_t dil_h, int64_t dil_w
+) {
+    int64_t N = feature.size(0);
+    int64_t C = feature.size(1);
+    int64_t H = feature.size(2);
+    int64_t W = feature.size(3);
+    int64_t h_col = get_out_dim(H, pad_h, k_h, stride_h, dil_h);
+    int64_t w_col = get_out_dim(W, pad_w, k_w, stride_w, dil_w);
+    
+    // 这里的并行策略：把 Batch N 视为独立的任务，或者展平。
+    // 为了简单且高效，我们在 kernel 里不处理 N，而是在 Host 端循环 N 或者 launch 一个巨大的 grid。
+    // 如果显存够大，一次 launch 所有 N 是最好的。
+    
+    int64_t total_elements = N * C * k_h * k_w * h_col * w_col; 
+    torch::Tensor feature_col = torch::empty({N, C * k_h * k_w, h_col*w_col}, 
+        feature.options());
+    
+    int threads = 256;
+    int blocks = (total_elements + threads - 1) / threads;
+
+    im2col_gpu_kernel_nchw_optimized<int8_t>
+    <<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>
+    (total_elements, feature.data_ptr<int8_t>(), feature_col.data_ptr<int8_t>(),
+     H, W, k_h, k_w, pad_h, pad_w, stride_h, stride_w, dil_h, dil_w, h_col, w_col);
+
+    return feature_col;
+}
 // ... Binding logic ...
 TORCH_LIBRARY_FRAGMENT(approxtorch, m){
     m.def("im2col_uint8(Tensor feature, int k_h, int k_w, int pad_h, int pad_w, int stride_h, int stride_w, int dil_h, int dil_w) -> Tensor");
+    m.def("im2col_int8(Tensor feature, int k_h, int k_w, int pad_h, int pad_w, int stride_h, int stride_w, int dil_h, int dil_w) -> Tensor");
 }
 TORCH_LIBRARY_IMPL(approxtorch, CUDA, m){
     m.impl("im2col_uint8", &im2col_uint8);
+    m.impl("im2col_int8", &im2col_int8);
 }
 
 } // namespace end 
