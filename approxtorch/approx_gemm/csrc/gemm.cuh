@@ -826,7 +826,11 @@ gemm_custom_grad_uint8_tt(const torch::Tensor& A, const torch::Tensor& B,
                 const torch::Tensor& scale_A, const torch::Tensor& zero_A,
                 const torch::Tensor& scale_B, const torch::Tensor& zero_B);
 
-}
+
+
+
+
+} // namespace approxtorch
 
 
 

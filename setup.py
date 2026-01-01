@@ -11,7 +11,7 @@ cuda_functions = CUDAExtension('approxtorch.approx_gemm._C',[
         "./approxtorch/approx_gemm/csrc/uint8_gemm.cu",
         "./approxtorch/approx_gemm/csrc/int8_depthwise_gemm.cu",
         "./approxtorch/approx_gemm/csrc/int4_gemm.cu",
-        "./approxtorch/approx_gemm/csrc/gemm_custom_grad_uint8.cu",
+        # "./approxtorch/approx_gemm/csrc/gemm_custom_grad_uint8.cu",
         './approxtorch/approx_gemm/csrc/approx_batch_gemm.cu',
         './approxtorch/approx_gemm/csrc/approx_gemm.cu',
         './approxtorch/approx_gemm/csrc/approx_implicit_gemm.cu',

@@ -4,10 +4,9 @@ from torch.autograd import Function
 import torch.nn.functional as F
 from torch.nn.modules.utils import _pair
 from . import quantization as Q
+import math
 
-
-#  use ste plus implicit gemm for fastest inference
-#  and ste training 
+# im2col + bgemm 
 class _conv2d_uint8_ste(Function):
     @staticmethod
     def forward(
@@ -38,6 +37,11 @@ class _conv2d_uint8_ste(Function):
         ctx.dilation = dilation
         ctx.groups = groups
         
+        (B, C, H, W) = feature.shape
+        (O, C, Kh, Kw) = weight.shape
+        OH = math.floor((H + 2*padding[0] - dilation[0]*(Kh-1) - 1)/stride[0] + 1)
+        OW = math.floor((W + 2*padding[1] - dilation[1]*(Kw-1) - 1)/stride[1] + 1)
+        L = OH * OW
         # 1 quantization
         match qmethod:
             case ('dynamic', 'tensor', 'tensor'):
@@ -64,10 +68,12 @@ class _conv2d_uint8_ste(Function):
         qweight = qweight.to(torch.uint8)
         
         # 2. implicit gemm for faster convolution
-        output = at.approx_gemm.ops.approx_implicit_gemm_uint8(qfeature, qweight, lut,
-                        pad_h=padding[0], pad_w=padding[1],
-                        stride_h=stride[0], stride_w=stride[1],
-                        dilation_h=dilation[0], dilation_w=dilation[1])
+        qfeature = at.approx_gemm.ops.im2col_uint8(qfeature, Kh, Kw, 
+                    padding[0], padding[1], stride[0], stride[1], dilation[0], dilation[1])
+        qweight = qweight.view(O, -1)
+        # qfeature (B, CKK, L), qweight (O, CKK)
+        output = at.approx_gemm.ops.approx_bgemm_uint8(qfeature, qweight, lut)
+        
         output = output.to(torch.float)
         qweight = qweight.to(torch.float)
         qfeature = qfeature.to(torch.float)
@@ -96,7 +102,7 @@ class _conv2d_uint8_ste(Function):
     @staticmethod
     def backward(ctx, upstream_grad):
         grad_feature, grad_weight = None, None
-        if ctx.has_bias and ctx.needs_input_grad[10]:
+        if ctx.has_bias and ctx.needs_input_grad[9]:
             grad_bias = upstream_grad.sum(dim=(0, 2, 3))
         feature, weight = ctx.saved_tensors
         grad_feature = torch.nn.grad.conv2d_input(feature.shape, weight, upstream_grad, stride=ctx.stride, padding=ctx.padding, dilation=ctx.dilation)
