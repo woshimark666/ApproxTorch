@@ -50,15 +50,15 @@ class _conv2d_bn_fake_int8(Function):
         output = output.view(B, O, OH, OW)
         # output shape is (B, O, OH, OW)
         
+        
         # 4. de-quantization
         output = output.to(torch.float)
         output = output * scale_feature * scale_weight.view(1, -1, 1, 1)
         # output shape is (B, O, OH, OW)
-        
-        # 5. add bias, BN bias is here, so we need to add bias here.
-        bias = bias.view(1, -1, 1, 1)
-        output = output + bias
-        
+
+        # 5. add bias
+        output = output + bias.view(1, -1, 1, 1)
+        # output = torch.nn.functional.leaky_relu(output, negative_slope=leaky_relu_k)
         # 6. re-quantization
         output = torch.round(output / scale_activation)
         output = torch.clamp(output, -128, 127)
@@ -80,7 +80,7 @@ class Conv2dBN_fake_int8(torch.nn.Module):
             stride: int | tuple[int, int] = 1,
             padding: int | tuple[int, int] = 0,
             dilation: int | tuple[int, int] = 1,
-            groups: int = 1):
+            groups: int = 1,):
         
         
         super().__init__()
