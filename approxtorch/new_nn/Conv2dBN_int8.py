@@ -46,7 +46,8 @@ class _conv2d_bn_fake_int8(Function):
         # qfeature (B, CKK, L), qweight (O, CKK)
         
         # 3. batched approx gemm
-        output = approx_bgemm_int8(qfeature, qweight, lut)
+        # output = approx_bgemm_int8(qfeature, qweight, lut)
+        output = torch.matmul(qweight.to(torch.float), qfeature.to(torch.float))
         output = output.view(B, O, OH, OW)
         # output shape is (B, O, OH, OW)
         
