@@ -73,14 +73,20 @@ class LSQQuantize_int(Function):
 
 class LSQQuantizer_int8(Function):
     @staticmethod
-    def forward(ctx, x, scale, per_channel: bool, ch_axis: int, Qn: int, Qp: int):
+    def forward(ctx, x, scale, per_channel: bool, ch_axis: int = 0, Qn: int = -128, Qp: int = 127):
         # Qn, Qp 分别是上界和下界
         
         # 1. 保存变量供 backward 使用
         ctx.save_for_backward(x, scale)
         
         # 2. 量化逻辑 (和之前一样)
-        x_div_s = x / scale
+        if per_channel:
+            shape = [1] * x.dim()
+            shape[ch_axis] = -1
+            a = scale.view(shape)
+        else:
+            a = scale
+        x_div_s = x / a
         q_x = torch.clamp(torch.round(x_div_s), Qn, Qp)
         q_x = q_x.to(torch.int8)
         return q_x
