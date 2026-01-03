@@ -15,6 +15,7 @@ class _conv2d_bn_fake_int8(Function):
         lut,
         scale_feature,
         scale_weight,
+        scale_output_feature,
         scale_activation,
         bias,
         stride: int | tuple[int, int] = 1,
@@ -52,18 +53,21 @@ class _conv2d_bn_fake_int8(Function):
         # output shape is (B, O, OH, OW)
         
         
-        # 4. de-quantization
+        # 4. Re-quantization
         output = output.to(torch.float)
-        output = output * scale_feature * scale_weight.view(1, -1, 1, 1)
+        output = output * scale_feature * scale_weight.view(1, -1, 1, 1) / scale_output_feature
+        output = torch.round(output)
+        output = torch.clamp(output, -128, 127)
+        output = output * scale_output_feature
         # output shape is (B, O, OH, OW)
 
         # 5. add bias
         output = output + bias.view(1, -1, 1, 1)
         # output = torch.nn.functional.leaky_relu(output, negative_slope=leaky_relu_k)
         # 6. re-quantization
-        output = torch.round(output / scale_activation)
-        output = torch.clamp(output, -128, 127)
-        output = output * scale_activation
+        # output = torch.round(output / scale_activation)
+        # output = torch.clamp(output, -128, 127)
+        # output = output * scale_activation
         
         return output
     
@@ -76,6 +80,7 @@ class Conv2dBN_fake_int8(torch.nn.Module):
             lut: torch.Tensor,
             scale_feature: torch.Tensor | None = None,
             scale_weight: torch.Tensor | None = None,
+            scale_output_feature: torch.Tensor | None = None,
             scale_activation: torch.Tensor | None = None,
             bias: torch.Tensor | None = None,
             stride: int | tuple[int, int] = 1,
@@ -117,6 +122,11 @@ class Conv2dBN_fake_int8(torch.nn.Module):
         else:
             self.bias = torch.nn.Parameter(torch.empty([out_channels]))
             
+        if scale_output_feature is not None:
+            self.scale_output_feature = torch.nn.Parameter(scale_output_feature, requires_grad=False)
+        else:
+            self.scale_output_feature = torch.nn.Parameter(torch.empty([]), requires_grad=False)
+            
             
     def __repr__(self):
         return f"Conv2dBN_fake_int8(in_channels={self.in_channels}, out_channels={self.out_channels}, " \
@@ -129,6 +139,7 @@ class Conv2dBN_fake_int8(torch.nn.Module):
                             self.lut, 
                             self.scale_feature, 
                             self.scale_weight, 
+                            self.scale_output_feature,
                             self.scale_activation,
                             self.bias, 
                             self.stride, 

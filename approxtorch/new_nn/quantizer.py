@@ -97,3 +97,18 @@ class LSQQuantizer_int8(Function):
 
 def lsq_quantize_int8(x, scale, per_channel: bool, ch_axis: int, Qn: int, Qp: int):
     return LSQQuantizer_int8.apply(x, scale, per_channel, ch_axis, Qn, Qp)
+
+class STEQuantizer_int8(Function):
+    @staticmethod
+    def forward(ctx, x, scale, Qn: int, Qp: int):
+        x_div = x / scale
+        q = torch.clamp(torch.round(x_div), Qn, Qp)
+        
+        return q
+    
+    @staticmethod
+    def backward(ctx, grad_y):
+        pass
+
+def ste_quantizer_int8(x, scale, per_channel: bool, ch_axis: int, Qn: int, Qp: int):
+    pass
