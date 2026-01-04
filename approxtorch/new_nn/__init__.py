@@ -9,3 +9,5 @@ from .cat import FakeQuantCat_int8
 
 
 from .starting_quant import StartingQuant_int8
+
+from .Conv2dBN_qat_int8 import Conv2dBN_qat_int8
