@@ -55,7 +55,8 @@ class _conv2d_bn_fake_int8(Function):
         
         # 4. Re-quantization
         output = output.to(torch.float)
-        output = output * scale_feature * scale_weight.view(1, -1, 1, 1) / scale_output_feature
+        output = output * scale_feature * scale_weight.view(1, -1, 1, 1)
+        output = output / scale_output_feature
         output = torch.round(output)
         output = torch.clamp(output, -128, 127)
         output = output * scale_output_feature

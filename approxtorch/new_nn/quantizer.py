@@ -1,7 +1,7 @@
 import torch
 from torch.autograd import Function
 import math
-
+import torch.nn as nn
 
 
 import torch
@@ -98,17 +98,127 @@ class LSQQuantizer_int8(Function):
 def lsq_quantize_int8(x, scale, per_channel: bool, ch_axis: int, Qn: int, Qp: int):
     return LSQQuantizer_int8.apply(x, scale, per_channel, ch_axis, Qn, Qp)
 
-class STEQuantizer_int8(Function):
-    @staticmethod
-    def forward(ctx, x, scale, Qn: int, Qp: int):
-        x_div = x / scale
-        q = torch.clamp(torch.round(x_div), Qn, Qp)
-        
-        return q
-    
-    @staticmethod
-    def backward(ctx, grad_y):
-        pass
 
-def ste_quantizer_int8(x, scale, per_channel: bool, ch_axis: int, Qn: int, Qp: int):
-    pass
+
+
+# class TrainableScaleQuantizer_int8(nn.Module):
+#     """
+#     可训练 scale 的 8-bit 对称量化器
+#     """
+    
+#     def __init__(
+#         self,
+#         per_channel: bool = False,
+#         num_channels: int = 1,
+#         init_scale: float = 1.0,
+#         scale_min: float = 1e-5,
+#         scale_max: float = 1e3,
+#         qmin: int = -127,
+#         qmax: int = 127,
+#     ):
+#         """
+#         Args:
+#             per_channel: 是否使用 per-channel 量化
+#             num_channels: 通道数（per_channel=True 时使用）
+#             init_scale: scale 初始值
+#             scale_min: scale 下界
+#             scale_max: scale 上界
+#         """
+#         super().__init__()
+        
+#         self.per_channel = per_channel
+#         self.num_channels = num_channels
+#         self.scale_min = scale_min
+#         self.scale_max = scale_max
+        
+#         # 8-bit 对称量化范围: [-127, 127]
+#         self.qmin = qmin
+#         self.qmax = qmax
+        
+#         # 初始化可训练的 scale 参数
+#         if per_channel:
+#             self.scale = nn.Parameter(torch.ones(num_channels) * init_scale)
+#         else:
+#             self.scale = nn.Parameter(torch.tensor(init_scale))
+    
+#     def _get_clamped_scale(self) -> torch.Tensor:
+#         """获取限制在上下界内的 scale"""
+#         return torch.clamp(self.scale, self.scale_min, self.scale_max)
+    
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+#         """
+#         前向传播：量化 -> 反量化（STE）
+#         """
+#         scale = self._get_clamped_scale()
+        
+#         # 调整 scale 形状以支持广播
+#         if self.per_channel and x.dim() > 1:
+#             shape = [1] * x.dim()
+#             shape[1] = -1  # channel 维度
+#             scale = scale.view(shape)
+        
+#         # 量化 + 反量化
+#         x_quant = torch.clamp(torch.round(x / scale), self.qmin, self.qmax)
+        
+#         # STE: 前向用量化值，反向传原始梯度
+#         return x
+    
+#     def quantize(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+#         """仅量化，返回整数值和 scale"""
+#         scale = self._get_clamped_scale()
+        
+#         if self.per_channel and x.dim() > 1:
+#             shape = [1] * x.dim()
+#             shape[1] = -1
+#             scale_view = scale.view(shape)
+#         else:
+#             scale_view = scale
+        
+#         x_quant = torch.clamp(torch.round(x / scale_view), self.qmin, self.qmax)
+#         return x_quant.to(torch.int8), scale
+    
+#     def dequantize(self, x_quant: torch.Tensor) -> torch.Tensor:
+#         """反量化"""
+#         scale = self._get_clamped_scale()
+        
+#         if self.per_channel and x_quant.dim() > 1:
+#             shape = [1] * x_quant.dim()
+#             shape[1] = -1
+#             scale = scale.view(shape)
+        
+#         return x_quant.float() * scale
+    
+#     def init_from_data(self, x: torch.Tensor):
+#         """根据数据初始化 scale"""
+#         with torch.no_grad():
+#             if self.per_channel and x.dim() > 1:
+#                 dims = [i for i in range(x.dim()) if i != 1]
+#                 max_val = torch.amax(torch.abs(x), dim=dims)
+#             else:
+#                 max_val = torch.max(torch.abs(x))
+            
+#             scale = max_val / self.qmax
+#             self.scale.data = torch.clamp(scale, self.scale_min, self.scale_max)
+    
+#     def extra_repr(self) -> str:
+#         return f'per_channel={self.per_channel}, scale_range=[{self.scale_min}, {self.scale_max}]'
+
+
+# # 测试
+# if __name__ == "__main__":
+#     print("8-bit 对称量化器测试\n")
+    
+#     # Per-tensor 测试
+#     quantizer = TrainableScaleQuantizer(scale_min=1e-4, scale_max=100)
+#     x = torch.randn(2, 4) * 10
+#     quantizer.init_from_data(x)
+    
+#     print(f"输入:\n{x}")
+#     print(f"Scale: {quantizer.scale.item():.4f} (范围: [{quantizer.scale_min}, {quantizer.scale_max}])")
+#     print(f"量化输出:\n{quantizer(x)}")
+    
+#     # 梯度测试
+#     x.requires_grad = True
+#     loss = quantizer(x).sum()
+#     loss.backward()
+#     print(f"\nScale 梯度: {quantizer.scale.grad.item():.4f}")
