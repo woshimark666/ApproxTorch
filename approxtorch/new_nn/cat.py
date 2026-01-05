@@ -1,5 +1,7 @@
 import torch
 import torch.nn as nn
+from .quantizer import LSQQuantizerFunc
+
 
 class FakeQuantCat_int8(nn.Module):
     def __init__(self, scale):
@@ -20,3 +22,18 @@ class FakeQuantCat_int8(nn.Module):
         x = x * self.scale
         
         return x
+    
+    
+class LSQCat_int8(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.Q_min, self.Q_max = -128, 127
+        self.scale = nn.Parameter(torch.tensor(1.0))
+
+    def forward(self, tensors, dim: int = 1):
+        x = torch.cat(tensors, dim=dim)
+        g = 1.0 / (x.numel() * self.Q_max) ** 0.5
+        return LSQQuantizerFunc.apply(x, self.scale, self.Q_min, self.Q_max, g)
+
+    def get_scale(self):
+        return self.scale.item()

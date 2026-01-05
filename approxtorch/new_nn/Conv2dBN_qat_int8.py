@@ -93,6 +93,10 @@ class _approx_conv2d_int8_lsq_ste(Function):
         grad_sf = None
         grad_sw = None
         
+        
+        grad_input_hat = None
+        grad_weight_hat = None
+        
         # 量化后的值 (用于 STE 反传)
         sw_view = scale_weight.view(-1, 1, 1, 1)
         qfeature_fp = qfeature * scale_feature      # [B, C_in, H, W]

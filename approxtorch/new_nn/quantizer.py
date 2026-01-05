@@ -127,7 +127,6 @@ class LSQQuantizerFunc(torch.autograd.Function):
 class LSQQuantizer(nn.Module):
     def __init__(self, bit_width=8, symmetric=True, per_channel=False, num_channels=1):
         super().__init__()
-        self.bit_width = bit_width
         self.per_channel = per_channel
         
         if symmetric:
@@ -137,25 +136,10 @@ class LSQQuantizer(nn.Module):
             self.q_min = 0
             self.q_max = 2 ** bit_width - 1
         
-        shape = (num_channels,) if per_channel else (1,)
+        shape = (num_channels,) if per_channel else ()
         self.scale = nn.Parameter(torch.ones(shape))
-        self.initialized = False
-
-    def init_scale(self, x):
-        with torch.no_grad():
-            if self.per_channel:
-                # x: [B, C, ...] -> 按 C 计算
-                x_flat = x.transpose(0, 1).reshape(x.size(1), -1)
-                scale_init = 2 * x_flat.abs().mean(dim=1) / (self.q_max ** 0.5)
-            else:
-                scale_init = 2 * x.abs().mean() / (self.q_max ** 0.5)
-            self.scale.data.copy_(scale_init.clamp(min=1e-8))
-        self.initialized = True
 
     def forward(self, x):
-        if not self.initialized:
-            self.init_scale(x)
-        
         scale = self.scale.abs() + 1e-8
         if self.per_channel:
             scale = scale.view(1, -1, *([1] * (x.dim() - 2)))
