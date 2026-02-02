@@ -80,8 +80,8 @@ __host__ __device__ int64_t get_out_dim(int64_t input_dim, int64_t padding, int6
 torch::Tensor im2col_uint8(
     const torch::Tensor& feature, 
     int64_t k_h, int64_t k_w,
-    int64_t pad_h, int64_t pad_w,
     int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
     int64_t dil_h, int64_t dil_w
 ) {
     int64_t N = feature.size(0);
@@ -115,8 +115,8 @@ torch::Tensor im2col_uint8(
 torch::Tensor im2col_int8(
     const torch::Tensor& feature, 
     int64_t k_h, int64_t k_w,
-    int64_t pad_h, int64_t pad_w,
     int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
     int64_t dil_h, int64_t dil_w
 ) {
     int64_t N = feature.size(0);
@@ -144,14 +144,14 @@ torch::Tensor im2col_int8(
 
     return feature_col;
 }
+
 // ... Binding logic ...
-TORCH_LIBRARY_FRAGMENT(approxtorch, m){
-    m.def("im2col_uint8(Tensor feature, int k_h, int k_w, int pad_h, int pad_w, int stride_h, int stride_w, int dil_h, int dil_w) -> Tensor");
-    m.def("im2col_int8(Tensor feature, int k_h, int k_w, int pad_h, int pad_w, int stride_h, int stride_w, int dil_h, int dil_w) -> Tensor");
-}
 TORCH_LIBRARY_IMPL(approxtorch, CUDA, m){
     m.impl("im2col_uint8", &im2col_uint8);
     m.impl("im2col_int8", &im2col_int8);
 }
 
+
 } // namespace end 
+
+

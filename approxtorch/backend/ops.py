@@ -1,0 +1,39 @@
+import torch
+from torch import Tensor
+from torch.nn.modules.utils import _pair
+
+
+__all__ = ['im2col_int8', 'im2col_uint8']
+
+def im2col_int8(feature: Tensor, kernel_size, stride=1, padding=0, dilation=1) -> Tensor:
+    kernel_size = _pair(kernel_size)
+    stride = _pair(stride)
+    padding = _pair(padding)
+    dilation = _pair(dilation)
+    
+    return torch.ops.approxtorch.im2col_int8.default(feature, 
+                                    kernel_size[0], 
+                                    kernel_size[1], 
+                                    stride[0], 
+                                    stride[1], 
+                                    padding[0], 
+                                    padding[1], 
+                                    dilation[0], 
+                                    dilation[1])
+
+
+def im2col_uint8(feature: Tensor, kernel_size, stride=1, padding=0, dilation=1) -> Tensor:
+    kernel_size = _pair(kernel_size)
+    stride = _pair(stride)
+    padding = _pair(padding)
+    dilation = _pair(dilation)
+    
+    return torch.ops.approxtorch.im2col_uint8.default(feature, 
+                                    kernel_size[0], 
+                                    kernel_size[1], 
+                                    stride[0], 
+                                    stride[1], 
+                                    padding[0], 
+                                    padding[1],
+                                    dilation[0], 
+                                    dilation[1])

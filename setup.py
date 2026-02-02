@@ -3,21 +3,17 @@ from torch.utils.cpp_extension import CppExtension, CUDAExtension, BuildExtensio
 
 
 
-cuda_functions = CUDAExtension('approxtorch.approx_gemm._C',[
-        "./approxtorch/approx_gemm/csrc/int8_gemm.cu",
-        "./approxtorch/approx_gemm/csrc/gemm_int8_cpu.cpp",
-        "./approxtorch/approx_gemm/csrc/gemm_int8_naive.cu",
-        "./approxtorch/approx_gemm/csrc/int8_gemm_gradient.cu",
-        "./approxtorch/approx_gemm/csrc/uint8_gemm.cu",
-        "./approxtorch/approx_gemm/csrc/int8_depthwise_gemm.cu",
-        "./approxtorch/approx_gemm/csrc/int4_gemm.cu",
-        # "./approxtorch/approx_gemm/csrc/gemm_custom_grad_uint8.cu",
-        './approxtorch/approx_gemm/csrc/approx_batch_gemm.cu',
-        './approxtorch/approx_gemm/csrc/approx_gemm.cu',
-        './approxtorch/approx_gemm/csrc/approx_implicit_gemm.cu',
-        './approxtorch/approx_gemm/csrc/im2col.cu',
+cuda_functions = CUDAExtension('approxtorch.backend._C',[
+        # dummy module
+        './approxtorch/backend/csrc/dummy_module.cpp',
+    
+        # cpu backend
+        './approxtorch/backend/csrc/cpu/im2col.cpp',
+        
+        # cuda backednd
+        './approxtorch/backend/csrc/cuda/im2col.cu',
     ],                   
-    include_dirs = ['approxtorch/approx_gemm/csrc'],
+    # include_dirs = ['approxtorch/approx_gemm/csrc'],
     extra_compile_args={'nvcc': ['-arch=native', '-std=c++17', "-O3"],
                         "cxx": ["-O3","-fdiagnostics-color=always",
                                 "-DPy_LIMITED_API=0x03090000",  # min CPython version 3.9
@@ -27,8 +23,8 @@ cuda_functions = CUDAExtension('approxtorch.approx_gemm._C',[
 
 setup(
     name="approxtorch",
-    version="1.0",
-    description="a simulation framework for 8-bit signed approximate multiplier in CNNs",
+    version="2.0",
+    description="a simulation framework for 8-bit (u)signed approximate multiplier in CNNs",
     packages=find_packages(),
     ext_modules=[cuda_functions],    # extensions to be compiled
     install_requires=['torch'],
