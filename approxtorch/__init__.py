@@ -6,7 +6,7 @@
 # from . import convert_model
 
 # neural network packages
-from . import nn
+# from . import nn
 
 # approximate gemm packages (CUDA backend)
 from . import backend

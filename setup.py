@@ -9,7 +9,7 @@ cuda_functions = CUDAExtension('approxtorch.backend._C',[
     
         # cpu backend
         './approxtorch/backend/csrc/cpu/im2col.cpp',
-        
+        './approxtorch/backend/csrc/cpu/gemm.cpp',
         # cuda backednd
         './approxtorch/backend/csrc/cuda/im2col.cu',
     ],                   
