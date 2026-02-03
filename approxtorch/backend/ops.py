@@ -43,3 +43,6 @@ def gemm_int8(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
 
 def gemm_uint8(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
     return torch.ops.approxtorch.gemm_uint8.default(A, B, lut)
+
+def gemm_int8_naive(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
+    return torch.ops.approxtorch.gemm_int8_naive.default(A, B, lut)

@@ -159,7 +159,7 @@ processFromSmemMasked_int8(
             // 查表索引计算
             //  in bgemm: valB is the feature, valA is the weight, 
             // we always put the feature in front
-            int lut_idx = (int)valB * 256 + (int)valA + 32896; // 假设是平铺的表
+            int lut_idx = (int)valA * 256 + (int)valB + 32896; // 假设是平铺的表
             
             // 累加
             threadResults[(wSubRowIdx * TM + resIdxM) * (WNITER * TN) + (wSubColIdx * TN) + resIdxN] 
@@ -171,5 +171,73 @@ processFromSmemMasked_int8(
   }
 }
 
+
+
+
+// --- 2. 带逻辑屏蔽的计算核心 (Masked Compute) --- for uint8
+template <const int BM, const int BN, const int BK, const int WM, const int WN,
+          const int WMITER, const int WNITER, const int WSUBM, const int WSUBN,
+          const int TM, const int TN>
+__device__ void
+processFromSmemMasked_uint8(
+    uint8_t *regM, uint8_t *regN, int *threadResults, 
+    const uint8_t *As, const uint8_t *Bs, 
+    const uint warpRow, const uint warpCol,
+    const uint threadRowInWarp, const uint threadColInWarp,
+    uint validK,         // 当前 Block 的有效 K 长度
+    const int* lut // 传入 LUT 指针
+) {
+  // 遍历 K 维度 (Block Tile K)
+  for (uint dotIdx = 0; dotIdx < BK; ++dotIdx) {
+      
+    // 【核心屏蔽逻辑】：如果 dotIdx 处于 Padding 区域，直接跳过计算
+    if (dotIdx >= validK) continue; 
+    // 注意：如果是 Warp 同步的架构，continue 可能导致不同步？
+    // 在 Volta/Ampere 架构后最好用 if 包裹整个体：
+    
+    // 1. Load Registers (即便无效数据也无妨，因为后面不累加)
+#pragma unroll
+    for (uint wSubRowIdx = 0; wSubRowIdx < WMITER; ++wSubRowIdx) {
+#pragma unroll
+      for (uint i = 0; i < TM; ++i) {
+        // 强制转 float 或 int 都可以，看你 LUT 输入要求
+        regM[wSubRowIdx * TM + i] = As[(dotIdx * BM) + warpRow * WM + wSubRowIdx * WSUBM + threadRowInWarp * TM + i];
+      }
+    }
+#pragma unroll
+    for (uint wSubColIdx = 0; wSubColIdx < WNITER; ++wSubColIdx) {
+#pragma unroll
+      for (uint i = 0; i < TN; ++i) {
+        regN[wSubColIdx * TN + i] = Bs[(dotIdx * BN) + warpCol * WN + wSubColIdx * WSUBN + threadColInWarp * TN + i];
+      }
+    }
+
+    // 2. Compute (只有 validK 范围内才累加)
+#pragma unroll
+    for (uint wSubRowIdx = 0; wSubRowIdx < WMITER; ++wSubRowIdx) {
+#pragma unroll
+      for (uint wSubColIdx = 0; wSubColIdx < WNITER; ++wSubColIdx) {
+#pragma unroll
+        for (uint resIdxM = 0; resIdxM < TM; ++resIdxM) {
+#pragma unroll
+          for (uint resIdxN = 0; resIdxN < TN; ++resIdxN) {
+            
+            // 获取操作数
+            uint8_t valA = regM[wSubRowIdx * TM + resIdxM];
+            uint8_t valB = regN[wSubColIdx * TN + resIdxN];
+            
+            // 查表索引计算
+            int lut_idx = (int)valA * 256 + (int)valB; // 假设是平铺的表
+            
+            // 累加
+            threadResults[(wSubRowIdx * TM + resIdxM) * (WNITER * TN) + (wSubColIdx * TN) + resIdxN] 
+                += __ldg(&lut[lut_idx]);
+                // += lut[lut_idx];
+          }
+        }
+      }
+    }
+  }
+}
 
 #endif
