@@ -12,8 +12,9 @@ cuda_functions = CUDAExtension('approxtorch.backend._C',[
         './approxtorch/backend/csrc/cpu/gemm.cpp',
         # cuda backednd
         './approxtorch/backend/csrc/cuda/im2col.cu',
+        './approxtorch/backend/csrc/cuda/gemm.cu',
     ],                   
-    # include_dirs = ['approxtorch/approx_gemm/csrc'],
+    include_dirs = ['./approxtorch/backend/csrc/cuda'],
     extra_compile_args={'nvcc': ['-arch=native', '-std=c++17', "-O3"],
                         "cxx": ["-O3","-fdiagnostics-color=always",
                                 "-DPy_LIMITED_API=0x03090000",  # min CPython version 3.9
