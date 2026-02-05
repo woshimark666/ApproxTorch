@@ -10,10 +10,12 @@ cuda_functions = CUDAExtension('approxtorch.backend._C',[
         # cpu backend
         './approxtorch/backend/csrc/cpu/im2col.cpp',
         './approxtorch/backend/csrc/cpu/gemm.cpp',
+        './approxtorch/backend/csrc/cpu/bgemm.cpp',
         # cuda backednd
         './approxtorch/backend/csrc/cuda/im2col.cu',
         './approxtorch/backend/csrc/cuda/gemm.cu',
         './approxtorch/backend/csrc/cuda/gemm_navie.cu',
+        './approxtorch/backend/csrc/cuda/bgemm.cu',
     ],                   
     include_dirs = ['./approxtorch/backend/csrc/cuda'],
     extra_compile_args={'nvcc': ['-arch=native', '-std=c++17', "-O3"],
