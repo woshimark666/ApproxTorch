@@ -72,7 +72,12 @@ class Conv2d_uint8(nn.Module):
             self.register_buffer('grad_dx', grad_dx)
             self.register_buffer('grad_dy', grad_dy)
             
-            
+    
+    def __repr__(self):
+        return f"Conv2d_uint8(in_channels={self.in_channels}, out_channels={self.out_channels}, " \
+            f"kernel_size={self.kernel_size}, grad={self.grad}" \
+            f"update_qparams={self.update_qparams}, eps={self.eps})"
+      
     def enbale_update_qparams(self):
         self.update_qparams = True
         

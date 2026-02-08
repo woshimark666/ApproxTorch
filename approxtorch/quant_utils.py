@@ -140,55 +140,46 @@ def collect_absmax(model, dataloader, qmethod, num_batches=None):
     return activation_absmax, weight_absmax
 
 # calibrate for uint8 model
-def calibrate_uint8(model, train_loader, data_precentage, qmethod=('static', 'tensor', 'tensor'), save_path=None):
+def calibrate_uint8(model, train_loader, data_percentage, 
+                    x_quantizer=('static', 'asymmetric', 'tensor'),
+                    w_quantizer=('static', 'asymmetric', 'tensor'),
+                    save_path=None):
     
     # Calculate number of batches to process based on percentage
-    num_batches = int(len(train_loader) * data_precentage) if data_precentage < 1.0 else None
+    num_batches = int(len(train_loader) * data_percentage) if data_percentage < 1.0 else None
     
     # Collect min/max values
-    activation_max, activation_min, weight_max, weight_min = collect_minmax(model, train_loader, qmethod, num_batches)
+    x_max, x_min, w_max, w_min = collect_minmax(model, train_loader, qmethod, num_batches)
+    
+    # 创建新的state_dict,先复制原有的所有参数
+    new_state_dict = model.state_dict().copy()
+    
     first_conv_found = False
+    
     for name, module in model.named_modules():
         if isinstance(module, torch.nn.Conv2d):
             if not first_conv_found:
                 # Skip the first Conv2d layer
                 first_conv_found = True
                 continue
-            # 权重scale: channel级
-            w_scale = (weight_max[name] - weight_min[name]) / 255.
-            w_zero = - torch.round(weight_min[name] / w_scale)
-            a_scale = (activation_max[name] - activation_min[name]) / 255.
-            a_zero = - torch.round(activation_min[name] / a_scale)
             
-            w_scale = w_scale.detach().clone()
-            w_zero = w_zero.detach().clone()
-            a_scale = a_scale.detach().clone()
-            a_zero = a_zero.detach().clone()
-            # 注册buffer（如果已存在则覆盖）
-            if hasattr(module, 'scale_feature'):
-                module.activation_scale.copy_(a_scale)
-            else:
-                module.register_buffer('scale_feature', a_scale)
-                
-            if hasattr(module, 'zero_feature'):
-                module.zero_feature.copy_(a_zero)
-            else:
-                module.register_buffer('zero_feature', a_zero)
-                
-            if hasattr(module, 'scale_weight'):
-                module.weight_scale.copy_(w_scale)
-            else:
-                module.register_buffer('scale_weight', w_scale)
-                
-            if hasattr(module, 'zero_weight'):
-                module.zero_weight.copy_(w_zero)
-            else:
-                module.register_buffer('zero_weight', w_zero)
+            # 计算量化参数
+            w_scale = (w_max[name] - w_min[name]) / 255.
+            w_zero = -torch.round(w_min[name] / w_scale)
+            x_scale = (x_max[name] - x_min[name]) / 255.
+            x_zero = -torch.round(x_min[name] / x_scale)
             
-
+            # 添加量化参数到新的state_dict
+            new_state_dict[f'{name}.scale_feature'] = x_scale.detach().clone()
+            new_state_dict[f'{name}.zero_feature'] = x_zero.detach().clone()
+            new_state_dict[f'{name}.scale_weight'] = w_scale.detach().clone()
+            new_state_dict[f'{name}.zero_weight'] = w_zero.detach().clone()
+    
     if save_path is not None:
-        torch.save(model.state_dict(), save_path)
+        torch.save(new_state_dict, save_path)
         print(f"State dict with scales saved to {save_path}")
+    
+    return new_state_dict
 
 
 
