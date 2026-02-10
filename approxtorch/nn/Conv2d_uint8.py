@@ -130,6 +130,8 @@ from torch.autograd import Function
 #         # 0. need update qparams ?
 #         if self.update_qparams and self.x_quantizer[0] == 'static' and self.w_quantizer[0] == 'static':
 #             self._update_qparams(x)
+        
+        
 #         # 1. quantization
 #         if self.x_quantizer[0] == 'static':
 #             q_x = Q.asymmetric_static_quantize_uint8_per_tensor(x, 
@@ -155,17 +157,28 @@ from torch.autograd import Function
         
 #         # 3. bgemm using different gradient method
 #         if self.grad == 'ste':
-#             output = bgemm.bgemm_uint8_ste(q_x, q_w, self.lut,
-#                             self.x_quantizer, self.w_quantizer,
-#                             self.scale_x, self.zero_x, self.scale_w, self.zero_w,
-#                             )
+#             output = bgemm.bgemm_uint8_ste(q_x, q_w, self.lut)
 #         elif self.grad == 'custom':
 #             pass
 #         else:
 #             raise ValueError("Invalid gradient type")
             
+
+#         # 4. de-quantization
+#         q_x = q_x.to(torch.float)
+#         q_w = q_w.to(torch.float)
+#         match self.w_quantizer[2]:
+#             case 'tensor':
+#                 output = output - self.zero_x * q_w.sum(dim=1).view(1, -1, 1) - \
+#                     self.zero_w * q_x.sum(dim=1, keepdim=True) + self.zero_x * self.zero_w * C * kH * kW
+#                 output = output * self.scale_x * self.scale_w
+#             case 'channel':
+#                 pass
+#             case _:
+#                 raise ValueError("Invalid weight quantization method")
         
-#         # 4. add bias
+        
+#         # 5. add bias
 #         if self.bias is not None:
 #             output = output + self.bias.view(1, -1, 1)
         
@@ -177,7 +190,7 @@ from torch.autograd import Function
 class _conv2d_uint8_base(Function):
     @staticmethod
     def forward(ctx, x: torch.Tensor, weight: torch.Tensor, 
-                lut: torch.Tensor, 
+                lut: torch.Tensor, grad: str,
                 x_quantizer: tuple[str, str, str], w_quantizer: tuple[str, str, str], 
                 scale_x: torch.Tensor, zero_x: torch.Tensor, 
                 scale_w: torch.Tensor, zero_w: torch.Tensor,
@@ -193,8 +206,13 @@ class _conv2d_uint8_base(Function):
         OH = (H + 2 * pH - dH * (kH - 1) - 1) // sH + 1
         OW = (W + 2 * pW - dW * (kW - 1) - 1) // sW + 1
         
-        ctx.save_for_backward(x, weight)
+        
+        ctx.x_quantizer = x_quantizer
+        ctx.w_quantizer = w_quantizer
         ctx.has_bias = bias is not None
+        ctx.kernel_size = kernel_size
+        ctx.output_shape = (B, O, OH, OW)
+        ctx.input_shape = x.shape
         ctx.stride = stride
         ctx.padding = padding
         ctx.dilation = dilation
@@ -225,11 +243,18 @@ class _conv2d_uint8_base(Function):
         q_x = im2col.im2col_uint8(q_x, kernel_size, stride, padding, dilation)
         q_w = q_w.view(O, -1)
         
+        match grad:
+            case 'ste':
+                ctx.save_for_backward(x, weight)
+            case 'int_ste':
+                ctx.save_for_backward(q_x, q_w, scale_x, zero_x, scale_w, zero_w)
+            case _:
+                raise ValueError("Invalid gradient type")
+        
         # 3. bgemm
         output = bgemm.bgemm_uint8_ste(q_x, q_w, lut,
                             x_quantizer, w_quantizer,
-                            scale_x, zero_x, scale_w, zero_w,
-                        )
+                            scale_x, zero_x, scale_w, zero_w)
         output = output.view(B, O, OH, OW)
         
         # 4. add bias
@@ -245,16 +270,63 @@ class _conv2d_uint8_ste(_conv2d_uint8_base):
     def backward(ctx, upstream_grad):
         grad_x, grad_weight, grad_bias = None, None, None
         x, weight = ctx.saved_tensors
-        if ctx.has_bias and ctx.needs_input_grad[9]:
+        if ctx.has_bias and ctx.needs_input_grad[10]:
             grad_bias = upstream_grad.sum(dim=(0, 2, 3))
             
             
         grad_x = torch.nn.grad.conv2d_input(x.shape, weight, upstream_grad, stride=ctx.stride, padding=ctx.padding, dilation=ctx.dilation)
         grad_weight = torch.nn.grad.conv2d_weight(x, weight.shape, upstream_grad, stride=ctx.stride, padding=ctx.padding, dilation=ctx.dilation)
-        return grad_x, grad_weight, None, None, None, None, None, None, None, grad_bias, None, None, None, None, None, None
+        return grad_x, grad_weight, None, None, None, None, None, None, None, None, grad_bias, None, None, None, None, None, None
 
-def conv2d_uint8_ste(x, weight, lut, x_quantizer, w_quantizer, scale_x, zero_x, scale_w, zero_w, bias, stride, padding, dilation, groups, qmin, qmax):
-    return _conv2d_uint8_ste.apply(x, weight, lut, x_quantizer, w_quantizer, scale_x, zero_x, scale_w, zero_w, bias, stride, padding, dilation, groups, qmin, qmax)
+
+class _conv2d_uint8_int_ste(_conv2d_uint8_base):
+    @staticmethod
+    def backward(ctx, upstream_grad):
+        grad_x, grad_weight, grad_bias,  = None, None, None
+        q_x, q_w, scale_x, zero_x, scale_w, zero_w = ctx.saved_tensors
+        q_x = q_x.to(torch.float)
+        q_w = q_w.to(torch.float)
+        
+        B, O, OH, OW = ctx.output_shape
+        B, C, H, W = ctx.input_shape
+        kH, kW = ctx.kernel_size
+        L = OH * OW
+        upstream_grad = upstream_grad.view(B,O,L)
+        
+        if ctx.has_bias and ctx.needs_input_grad[10]:
+            grad_bias = upstream_grad.sum(dim=(0, 2))
+            
+        
+        if ctx.w_quantizer[2] == 'tensor':
+            # compute grad_x
+            term1 = torch.einsum('nol,ok->nkl', upstream_grad, q_w)
+            term2 = - zero_w * upstream_grad.sum(dim=1, keepdim=True)
+            grad_x = (term1 + term2) * scale_w # (N, CKK, L)
+            grad_x = torch.nn.functional.fold(grad_x, (H, W), ctx.kernel_size, padding=ctx.padding, stride=ctx.stride, dilation=ctx.dilation)
+            # grad_x shape is (B, C, H, W)
+            
+            # compute grad_weight
+            term1 = torch.einsum('nol,nkl->ok', upstream_grad, q_x)
+            term2 = - zero_x * upstream_grad
+            term2 = term2.sum(dim=(0, 2)).view(-1, 1)
+            grad_weight = (term1 + term2) * scale_x # (O, CKK)
+            grad_weight = grad_weight.view(O, C, kH, kW)
+            # grad_weight shape is (O, C, kH, kW)
+            
+        if ctx.w_quantizer[2] == 'channel':
+            pass
+        
+        return grad_x, grad_weight, None, None, None, None, None, None, None, None, grad_bias, None, None, None, None, None, None
+
+def conv2d_uint8(x, weight, lut, grad, x_quantizer, w_quantizer, scale_x, zero_x, scale_w, zero_w, bias, stride, padding, dilation, groups, qmin, qmax):
+    
+    match grad:
+        case 'ste':
+            return _conv2d_uint8_ste.apply(x, weight, lut, grad, x_quantizer, w_quantizer, scale_x, zero_x, scale_w, zero_w, bias, stride, padding, dilation, groups, qmin, qmax)
+        case 'int_ste':
+            return _conv2d_uint8_int_ste.apply(x, weight, lut, grad, x_quantizer, w_quantizer, scale_x, zero_x, scale_w, zero_w, bias, stride, padding, dilation, groups, qmin, qmax)
+        case _:
+            raise ValueError("Invalid gradient type")
 
 
 class Conv2d_uint8(nn.Module):
@@ -369,7 +441,8 @@ class Conv2d_uint8(nn.Module):
         if self.update_qparams and self.x_quantizer[0] == 'static' and self.w_quantizer[0] == 'static':
             self._update_qparams(x)
         
-        output = conv2d_uint8_ste(x, self.weight, self.lut, self.x_quantizer, self.w_quantizer,
+        
+        output = conv2d_uint8(x, self.weight, self.lut, self.grad, self.x_quantizer, self.w_quantizer,
                                 self.scale_x, self.zero_x, self.scale_w, self.zero_w, self.bias,
                                 self.stride, self.padding, self.dilation, self.groups, self.qmin, self.qmax)
         
