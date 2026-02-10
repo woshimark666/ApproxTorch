@@ -5,11 +5,9 @@ from torch.autograd import Function
 
 
 # 我们要把量化也包在这里, 这里输出就是反量化的结果
-class _bgemm_uint8_ste(Function):
+class _bgemm_uint8(Function):
     @staticmethod
-    def forward(ctx, q_x, q_w, lut, 
-                x_quantizer, w_quantizer,
-                scale_x, zero_x, scale_w, zero_w):
+    def forward(ctx, q_x, q_w, lut):
         # feature (N, CKK, L)
         # weight (O, CKK)
         

@@ -299,17 +299,19 @@ class _conv2d_uint8_int_ste(_conv2d_uint8_base):
         
         if ctx.w_quantizer[2] == 'tensor':
             # compute grad_x
-            term1 = torch.einsum('nol,ok->nkl', upstream_grad, q_w)
-            term2 = - zero_w * upstream_grad.sum(dim=1, keepdim=True)
-            grad_x = (term1 + term2) * scale_w # (N, CKK, L)
+            # term1 = torch.einsum('nol,ok->nkl', upstream_grad, q_w)
+            dx_term1 = torch.matmul(q_w.t(), upstream_grad)  
+            dx_term2 = - zero_w * upstream_grad.sum(dim=1, keepdim=True)
+            grad_x = (dx_term1 + dx_term2) * scale_w # (N, CKK, L)
             grad_x = torch.nn.functional.fold(grad_x, (H, W), ctx.kernel_size, padding=ctx.padding, stride=ctx.stride, dilation=ctx.dilation)
             # grad_x shape is (B, C, H, W)
             
             # compute grad_weight
-            term1 = torch.einsum('nol,nkl->ok', upstream_grad, q_x)
-            term2 = - zero_x * upstream_grad
-            term2 = term2.sum(dim=(0, 2)).view(-1, 1)
-            grad_weight = (term1 + term2) * scale_x # (O, CKK)
+            # dy_term1 = torch.einsum('nol,nkl->ok', upstream_grad, q_x)
+            dy_term1 = torch.bmm(upstream_grad, q_x.transpose(1, 2)).sum(dim=0) 
+            dy_term2 = - zero_x * upstream_grad
+            dy_term2 = dy_term2.sum(dim=(0, 2)).view(-1, 1)
+            grad_weight = (dy_term1 + dy_term2) * scale_x # (O, CKK)
             grad_weight = grad_weight.view(O, C, kH, kW)
             # grad_weight shape is (O, C, kH, kW)
             
