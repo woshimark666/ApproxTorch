@@ -18,26 +18,26 @@ class _im2col_uint8(Function):
         output = at.backend.ops.im2col_uint8(x, kernel_size, stride, padding, dilation)
         return output
 
-    @staticmethod
-    def backward(ctx, grad_output):
-        """
-        grad_output: [B, C*kH*kW, L] (float)
-        return: grad_input [B, C, H, W]
+    # @staticmethod
+    # def backward(ctx, grad_output):
+    #     """
+    #     grad_output: [B, C*kH*kW, L] (float)
+    #     return: grad_input [B, C, H, W]
         
-        im2col 的反向 = col2im = F.fold
-        """
-        B, C, H, W = ctx.input_shape
+    #     im2col 的反向 = col2im = F.fold
+    #     """
+    #     B, C, H, W = ctx.input_shape
 
-        grad_input = F.fold(
-            grad_output,
-            output_size=(H, W),
-            kernel_size=ctx.kernel_size,
-            dilation=ctx.dilation,
-            padding=ctx.padding,
-            stride=ctx.stride,
-        )
+    #     grad_input = F.fold(
+    #         grad_output,
+    #         output_size=(H, W),
+    #         kernel_size=ctx.kernel_size,
+    #         dilation=ctx.dilation,
+    #         padding=ctx.padding,
+    #         stride=ctx.stride,
+    #     )
 
-        return grad_input, None, None, None, None
+    #     return grad_input, None, None, None, None
     
     
 

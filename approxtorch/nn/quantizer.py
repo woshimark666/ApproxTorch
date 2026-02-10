@@ -39,7 +39,7 @@ class _asymmetric_static_quantize_uint8_per_channel(Function):
         gate = (u >= qmin) & (u <= qmax)
         gate = gate.to(dtype=grad_out.dtype)
 
-        grad_x = grad_out * gate
+        grad_x = grad_out * gate / s 
 
         # only return grad for x
         return grad_x, None, None, None, None
@@ -68,19 +68,19 @@ class _asymmetric_static_quantize_uint8_per_tensor(Function):
         ctx.qmax = qmax
         return q.to(torch.uint8)
 
-    @staticmethod
-    def backward(ctx, grad_out: torch.Tensor):
-        u, s = ctx.saved_tensors
-        qmin = ctx.qmin
-        qmax = ctx.qmax
+    # @staticmethod
+    # def backward(ctx, grad_out: torch.Tensor):
+    #     u, s = ctx.saved_tensors
+    #     qmin = ctx.qmin
+    #     qmax = ctx.qmax
 
-        gate = (u >= qmin) & (u <= qmax)
-        gate = gate.to(dtype=grad_out.dtype)
+    #     gate = (u >= qmin) & (u <= qmax)
+    #     gate = gate.to(dtype=grad_out.dtype)
 
-        grad_x = grad_out * gate / s
+    #     grad_x = grad_out * gate 
 
-        # only return grad for x
-        return grad_x, None, None, None, None, None
+    #     # only return grad for x
+    #     return grad_x, None, None, None, None, None
 
 
 def asymmetric_static_quantize_uint8_per_channel(x, s, z, qmin, qmax):
