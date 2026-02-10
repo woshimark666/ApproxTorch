@@ -39,10 +39,10 @@ class _asymmetric_static_quantize_uint8_per_channel(Function):
         gate = (u >= qmin) & (u <= qmax)
         gate = gate.to(dtype=grad_out.dtype)
 
-        grad_x = grad_out * gate / s
+        grad_x = grad_out * gate
 
         # only return grad for x
-        return grad_x, None, None, None, None, None
+        return grad_x, None, None, None, None
 
 
 # static asymmetric quantization for uint8 per tensor

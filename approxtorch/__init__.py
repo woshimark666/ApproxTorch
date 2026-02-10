@@ -11,7 +11,9 @@
 # approximate gemm packages (CUDA backend)
 from . import backend
 from . import nn
-
+from . import quant_utils
+from .convert_model import convert_model
+from . import load_lut
 # # load LUT utils
 # from .load_lut import load_lut, load_lre_grad_lut, load_custom_grad_lut, load_half_custom_grad_lut
 

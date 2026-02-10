@@ -7,15 +7,15 @@ from torch.nn.modules.utils import _pair
 
 class _im2col_uint8(Function):
     @staticmethod
-    def forward(ctx, input, kernel_size, stride = 1, padding = 0, dilation = 1):
-        ctx.input_shape = input.shape
+    def forward(ctx, x, kernel_size, stride = 1, padding = 0, dilation = 1):
+        ctx.input_shape = x.shape
         ctx.kernel_size = _pair(kernel_size)
         ctx.dilation = _pair(dilation)
         ctx.padding = _pair(padding)
         ctx.stride = _pair(stride)
 
         # im2col for uint8
-        output = at.backend.ops.im2col_uint8(feature, kernel_size, stride, padding, dilation)
+        output = at.backend.ops.im2col_uint8(x, kernel_size, stride, padding, dilation)
         return output
 
     @staticmethod
@@ -43,15 +43,15 @@ class _im2col_uint8(Function):
 
 class _im2col_int8(Function):
     @staticmethod
-    def forward(ctx, input, kernel_size, stride = 1, padding = 0, dilation = 1):
-        ctx.input_shape = input.shape
+    def forward(ctx, x, kernel_size, stride = 1, padding = 0, dilation = 1):
+        ctx.input_shape = x.shape
         ctx.kernel_size = _pair(kernel_size)
         ctx.dilation = _pair(dilation)
         ctx.padding = _pair(padding)
         ctx.stride = _pair(stride)
 
         # im2col for uint8
-        output = at.backend.ops.im2col_int8(feature, kernel_size, stride, padding, dilation)
+        output = at.backend.ops.im2col_int8(x, kernel_size, stride, padding, dilation)
         return output
 
     @staticmethod

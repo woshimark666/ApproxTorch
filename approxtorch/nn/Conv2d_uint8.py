@@ -6,6 +6,7 @@ from . import quantizer as Q
 from . import bgemm
 from . import im2col
 import math
+from torch.autograd import Function
 
 class Conv2d_uint8(nn.Module):
     def __init__(self,
@@ -29,10 +30,10 @@ class Conv2d_uint8(nn.Module):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
-        self.kernel_size = kernel_size
-        self.stride = stride
-        self.padding = padding
-        self.dilation = dilation
+        self.kernel_size = _pair(kernel_size)
+        self.stride = _pair(stride)
+        self.padding = _pair(padding)
+        self.dilation = _pair(dilation)
         self.groups = groups
         self.x_quantizer = x_quantizer
         self.w_quantizer = w_quantizer
@@ -45,28 +46,28 @@ class Conv2d_uint8(nn.Module):
         # lut 
         self.register_buffer('lut', lut)
         # weight
-        self.weight = nn.Parameter(torch.Tensor(out_channels, in_channels, kernel_size, kernel_size))
+        self.weight = nn.Parameter(torch.Tensor(self.out_channels, self.in_channels, self.kernel_size[0], self.kernel_size[1]))
         # bias
         if isinstance(bias, torch.Tensor):
             self.bias = nn.Parameter(bias)
         elif bias == True:
-            self.bias = nn.Parameter(torch.Tensor(out_channels))
+            self.bias = nn.Parameter(torch.Tensor(self.out_channels))
         elif bias == False or bias == None:
             self.bias = None
         else:
             raise ValueError("Invalid bias type")
         
         if self.x_quantizer[0] == 'static':
-            self.register_buffer('scale_x', torch.tensor(()))
-            self.register_buffer('zero_x', torch.tensor(()))
+            self.register_buffer('scale_x', torch.tensor(1., dtype=torch.float32))
+            self.register_buffer('zero_x', torch.tensor(0., dtype=torch.float32))
         
         if self.w_quantizer[0] == 'static':
             if self.w_quantizer[2] == 'channel':
-                self.register_buffer('scale_w', torch.tensor((out_channels,)))
-                self.register_buffer('zero_w', torch.tensor((out_channels,)))
+                self.register_buffer('scale_w', torch.tensor((self.out_channels,)))
+                self.register_buffer('zero_w', torch.tensor((self.out_channels,)))
             else:
-                self.register_buffer('scale_w', torch.tensor(()))
-                self.register_buffer('zero_w', torch.tensor(()))
+                self.register_buffer('scale_w', torch.tensor(1., dtype=torch.float32))
+                self.register_buffer('zero_w', torch.tensor(0., dtype=torch.float32))
                 
         if self.grad != 'ste':
             self.register_buffer('grad_dx', grad_dx)
@@ -75,7 +76,7 @@ class Conv2d_uint8(nn.Module):
     
     def __repr__(self):
         return f"Conv2d_uint8(in_channels={self.in_channels}, out_channels={self.out_channels}, " \
-            f"kernel_size={self.kernel_size}, grad={self.grad}" \
+            f"kernel_size={self.kernel_size}, grad={self.grad}, " \
             f"update_qparams={self.update_qparams}, eps={self.eps})"
       
     def enbale_update_qparams(self):
@@ -154,45 +155,63 @@ class Conv2d_uint8(nn.Module):
         
         # 3. bgemm using different gradient method
         if self.grad == 'ste':
-            output = bgemm.bgemm_uint8_ste(q_x, q_w, self.lut)
+            output = bgemm.bgemm_uint8_ste(q_x, q_w, self.lut,
+                            self.x_quantizer, self.w_quantizer,
+                            self.scale_x, self.zero_x, self.scale_w, self.zero_w,
+                            )
         elif self.grad == 'custom':
             pass
         else:
             raise ValueError("Invalid gradient type")
             
-        # 4. de-quantization
-        output = output.to(torch.float)
-        q_w = q_w.to(torch.float)
-        q_x = q_x.to(torch.float)
-        K = q_w.shape[1]
-        # q_w @ 1 → (O,)  每行求和
-        qw_sum = q_w.detach().sum(dim=1)  # (O,)
-
-        # 1 @ q_x → (N, 1, L) 或 (N, CKK, L) 按列求和 → (N, 1, L)
-        qx_sum = q_x.detach().sum(dim=1, keepdim=True)  # (N, 1, L)
-        if self.w_quantizer[2] == 'tensor':
-            # per-tensor: s_w, z_w 都是标量
-            output = self.scale_x * self.scale_w * (
-                output
-                - self.zero_x * qw_sum.view(1, -1, 1)      # (1, O, 1)
-                - self.zero_w * qx_sum                       # (N, 1, L)
-                + self.zero_w * self.zero_x * K
-            )
-
-        elif self.w_quantizer[2] == 'channel':
-            # per-channel: s_w (O,), z_w (O,)
-            s_w = self.scale_w.view(1, -1, 1)   # (1, O, 1)
-            z_w = self.zero_w.view(1, -1, 1)    # (1, O, 1)
-
-            output = self.scale_x * s_w * (
-                output
-                - self.zero_x * qw_sum.view(1, -1, 1)
-                - z_w * qx_sum
-                + z_w * self.zero_x * K
-            )
-
-        # 5. add bias
+        
+        # 4. add bias
         if self.bias is not None:
             output = output + self.bias.view(1, -1, 1)
         
         return output.view(B, O, OH, OW)
+    
+    
+    
+    
+class _conv2d_uint8_base(Function):
+    @staticmethod()
+    def forward(ctx, x: torch.Tensor, weight: torch.Tensor, 
+                lut: torch.Tensor, 
+                x_quantizer: tuple[str, str, str], w_quantizer: tuple[str, str, str], 
+                scale_x: torch.Tensor, zero_x: torch.Tensor, 
+                scale_w: torch.Tensor, zero_w: torch.Tensor,
+                bias, stride, padding, dilation, groups, qmin, qmax
+                ):
+        
+        B, C, H, W = x.shape
+        O, C, kH, kW = weight.shape
+        sH, sW = _pair(self.stride)
+        pH, pW = _pair(self.padding)
+        dH, dW = _pair(self.dilation)
+        O = self.out_channels
+        OH = (H + 2 * pH - dH * (kH - 1) - 1) // sH + 1
+        OW = (W + 2 * pW - dW * (kW - 1) - 1) // sW + 1
+        
+
+        # 1. quantization
+        if x_quantizer[0] == 'static':
+            q_x = Q.asymmetric_static_quantize_uint8_per_tensor(x, 
+                scale_x, zero_x, qmin, qmax)
+        elif self.x_quantizer[0] == 'dynamic':
+            pass
+        
+        if w_quantizer[0] == 'static':
+            if w_quantizer[2] == 'tensor':
+                q_w = Q.asymmetric_static_quantize_uint8_per_tensor(weight, 
+                    scale_w, zero_w, qmin, qmax)
+            elif w_quantizer[2] == 'channel':
+                q_w = Q.asymmetric_static_quantize_uint8_per_channel(weight, 
+                    scale_w, zero_w, qmin, qmax)
+            else:
+                raise ValueError("Invalid weight quantization method")
+        elif self.w_quantizer[0] == 'dynamic':
+            pass
+        
+        # 2. im2col
+        

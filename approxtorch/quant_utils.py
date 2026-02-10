@@ -2,14 +2,14 @@ import torch
 from .nn import Conv2d_int8, Conv2d_uint8
 import copy
 
+
 # collect the min/max for each layer's activation and weight
-# min/max is for uint type
-def collect_minmax(model, dataloader, qmethod, num_batches=None):
+def collect_minmax(model, dataloader, w_quantizer, num_batches=None):
     model.eval()
-    activation_min = {}
-    activation_max = {}
-    weight_min = {}
-    weight_max = {}
+    x_min = {}
+    a_max = {}
+    w_min = {}
+    w_max = {}
     hooks = []
     
     def hook_fn(name):
@@ -18,31 +18,22 @@ def collect_minmax(model, dataloader, qmethod, num_batches=None):
             min_val = torch.min(x)
             max_val = torch.max(x)
             
-            if name not in activation_max:
-                activation_max[name] = max_val
+            if name not in a_max:
+                a_max[name] = max_val
             else:
-                activation_max[name] = max(activation_max[name], max_val)
+                a_max[name] = max(a_max[name], max_val)
                 
-                
-            if name not in activation_min:
-                activation_min[name] = min_val
+            if name not in x_min:
+                x_min[name] = min_val
             else:
-                activation_min[name] = min(activation_min[name], min_val)
+                x_min[name] = min(x_min[name], min_val)
                 
         return hook
     
-    # Register hooks for all Conv2d except the first one
-    # collect the absmax for activation
-    first_conv_found = False
     for name, module in model.named_modules():
         if isinstance(module, torch.nn.Conv2d):
-            if not first_conv_found:
-                # Skip the first Conv2d layer
-                first_conv_found = True
-                continue
             hooks.append(module.register_forward_hook(hook_fn(name)))
     
-    # Process data
     with torch.no_grad():
         for i, (inputs, _) in enumerate(dataloader):
             if num_batches is not None and i > num_batches:
@@ -50,30 +41,23 @@ def collect_minmax(model, dataloader, qmethod, num_batches=None):
             inputs = inputs.cuda()
             model(inputs)
     
-    # Remove hooks
     for hook in hooks:
         hook.remove()
     
-    # collect the absmax for weight
-    first_conv_found = False
     for name, module in model.named_modules():
         if isinstance(module, torch.nn.Conv2d):
-            if not first_conv_found:
-                # Skip the first Conv2d layer
-                first_conv_found = True
-                continue
             weight = module.weight.data
             
-            if qmethod[2] == 'channel':
-                weight_max[name] = torch.amax(weight, dim=(1,2,3), keepdim=False)
-                weight_min[name] = torch.amin(weight, dim=(1,2,3), keepdim=False)
-            elif qmethod[2] == 'tensor':
-                weight_max[name] = torch.max(weight)
-                weight_min[name] = torch.min(weight)
+            if w_quantizer[2] == 'channel':
+                w_max[name] = torch.amax(weight, dim=(1,2,3), keepdim=False)
+                w_min[name] = torch.amin(weight, dim=(1,2,3), keepdim=False)
+            elif w_quantizer[2] == 'tensor':
+                w_max[name] = torch.max(weight)
+                w_min[name] = torch.min(weight)
             else:
-                raise ValueError(f"Invalid qmethod: {qmethod}")
+                raise ValueError(f"Invalid w_quantizer: {w_quantizer}")
 
-    return activation_max, activation_min, weight_max, weight_min
+    return a_max, x_min, w_max, w_min
 
 
 # collect the absmax for each layer's activation and weight
@@ -140,7 +124,7 @@ def collect_absmax(model, dataloader, qmethod, num_batches=None):
     return activation_absmax, weight_absmax
 
 # calibrate for uint8 model
-def calibrate_uint8(model, train_loader, data_percentage, 
+def calibrate_uint8(model, train_loader, data_percentage, ignore_first_conv=True,
                     x_quantizer=('static', 'asymmetric', 'tensor'),
                     w_quantizer=('static', 'asymmetric', 'tensor'),
                     save_path=None):
@@ -149,7 +133,8 @@ def calibrate_uint8(model, train_loader, data_percentage,
     num_batches = int(len(train_loader) * data_percentage) if data_percentage < 1.0 else None
     
     # Collect min/max values
-    x_max, x_min, w_max, w_min = collect_minmax(model, train_loader, qmethod, num_batches)
+    x_max, x_min, w_max, w_min = collect_minmax(model, train_loader, 
+                                    w_quantizer, num_batches)
     
     # 创建新的state_dict,先复制原有的所有参数
     new_state_dict = model.state_dict().copy()
@@ -158,7 +143,7 @@ def calibrate_uint8(model, train_loader, data_percentage,
     
     for name, module in model.named_modules():
         if isinstance(module, torch.nn.Conv2d):
-            if not first_conv_found:
+            if ignore_first_conv and not first_conv_found:
                 # Skip the first Conv2d layer
                 first_conv_found = True
                 continue
@@ -170,10 +155,10 @@ def calibrate_uint8(model, train_loader, data_percentage,
             x_zero = -torch.round(x_min[name] / x_scale)
             
             # 添加量化参数到新的state_dict
-            new_state_dict[f'{name}.scale_feature'] = x_scale.detach().clone()
-            new_state_dict[f'{name}.zero_feature'] = x_zero.detach().clone()
-            new_state_dict[f'{name}.scale_weight'] = w_scale.detach().clone()
-            new_state_dict[f'{name}.zero_weight'] = w_zero.detach().clone()
+            new_state_dict[f'{name}.scale_x'] = x_scale.detach().clone()
+            new_state_dict[f'{name}.zero_x'] = x_zero.detach().clone()
+            new_state_dict[f'{name}.scale_w'] = w_scale.detach().clone()
+            new_state_dict[f'{name}.zero_w'] = w_zero.detach().clone()
     
     if save_path is not None:
         torch.save(new_state_dict, save_path)
@@ -183,7 +168,10 @@ def calibrate_uint8(model, train_loader, data_percentage,
 
 
 
-def calibrate_int8(model, train_loader, data_precentage, qmethod=('static', 'tensor', 'tensor'), save_path=None):
+def calibrate_int8(model, train_loader, data_precentage, 
+                   x_quantizer=('static', 'asymmetric', 'tensor'), 
+                   w_quantizer=('static', 'asymmetric', 'tensor'), 
+                   save_path=None):
     
     # Calculate number of batches to process based on percentage
     num_batches = int(len(train_loader) * data_precentage) if data_precentage < 1.0 else None
@@ -257,19 +245,20 @@ def calibrate_int4(model, train_loader, data_precentage, qmethod=('static', 'ten
 
 
 all_conv = (Conv2d_int8, Conv2d_uint8)
+
+
 def forze_scale(model):
     """
     input the model and forze all the scale parameters
     """
-    
     for name, module in model.named_modules():
-        if isinstance(module, all_conv):
-            module.freeze_scale()
+        if type(module) in all_conv:
+            module.enbale_update_qparams()
 
 def unforze_scale(model):
     """
     input the model and unforze all the scale parameters
     """
     for name, module in model.named_modules():
-        if isinstance(module, all_conv):
-            module.unfreeze_scale()
+        if type(module) in all_conv:
+            module.disable_update_qparams()
