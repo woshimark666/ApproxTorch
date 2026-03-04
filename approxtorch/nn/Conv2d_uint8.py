@@ -257,7 +257,7 @@ class Conv2d_uint8(nn.Module):
             f"kernel_size={self.kernel_size}, grad={self.grad}, " \
             f"update_qparams={self.update_qparams}, eps={self.eps})"
       
-    def enbale_update_qparams(self):
+    def enable_update_qparams(self):
         self.update_qparams = True
         
     def disable_update_qparams(self):

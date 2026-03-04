@@ -26,9 +26,31 @@ def asymmetric_static_quantize_uint8_per_channel(x, s, z, qmin, qmax):
 
     return q.to(torch.uint8)
 
+def symmetric_static_quantize_int8_per_tensor(x, s, z, qmin, qmax):
+    s = s.to(torch.float)
+    u = x / s 
+    q = torch.round(u).clamp(qmin, qmax)
 
+    return q.to(torch.int8)
 
+def symmetric_static_quantize_int8_per_channel(x, s, z, qmin, qmax):
+    s = s.view(-1,1,1,1)
+    u = x / s 
+    q = torch.round(u).clamp(qmin, qmax)
 
+    return q.to(torch.int8)
+
+def symmetric_dynamic_quantize_int8_per_tensor(x, qmin, qmax):
+    absmax = torch.max(torch.abs(x))
+    s = absmax / float((qmax - qmin)/2)
+    q = torch.round(x / s).clamp(qmin, qmax)
+    return q.to(torch.int8)
+
+def symmetric_dynamic_quantize_int8_per_channel(x, qmin, qmax):
+    absmax = torch.amax(torch.abs(x), dim=(1,2,3), keepdim=True)
+    s = absmax / float((qmax - qmin)/2)
+    q = torch.round(x / s).clamp(qmin, qmax)
+    return q.to(torch.int8)
 
 
 

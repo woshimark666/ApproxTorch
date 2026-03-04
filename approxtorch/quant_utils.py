@@ -253,7 +253,7 @@ def forze_scale(model):
     """
     for name, module in model.named_modules():
         if type(module) in all_conv:
-            module.enbale_update_qparams()
+            module.disable_update_qparams()
 
 def unforze_scale(model):
     """
@@ -261,4 +261,4 @@ def unforze_scale(model):
     """
     for name, module in model.named_modules():
         if type(module) in all_conv:
-            module.disable_update_qparams()
+            module.enable_update_qparams()
