@@ -20,8 +20,8 @@ __global__ void bgemm_custom_grad_uint8_kernel(
     const float*   __restrict__ dY,     // (N, O, L)
     const float*   __restrict__ dx_lut, // (65536,)
     const float*   __restrict__ dw_lut, // (65536,)
-    float*         __restrict__ grad_X,  // (N, CKK, L)
-    float*         __restrict__ grad_W,  // (O, CKK)
+    float*         __restrict__ grad_X,  // (N, CKK, L) float32
+    double*        __restrict__ grad_W,  // (O, CKK) float64 for precision
     int N, int CKK, int O, int L
 ) {
     int c = blockIdx.x;
@@ -43,64 +43,43 @@ __global__ void bgemm_custom_grad_uint8_kernel(
         lut_row = (int)x_val << 8;
     }
 
-    __shared__ uint8_t smem_w[TILE_O];
-    // For batched reduction: TILE_O rows x BLOCK_SIZE
-    // That's TILE_O * 256 * 4 = 32KB for TILE_O=32 -- fits.
-    __shared__ float smem_reduce[TILE_O * BLOCK_SIZE];
+    // Shared memory: double for grad_W reduction
+    __shared__ double smem_reduce[BLOCK_SIZE];
 
     float grad_x_accum = 0.0f;
 
-    for (int o_base = 0; o_base < O; o_base += TILE_O) {
-        int tile_end = min(o_base + TILE_O, O);
-        int tile_size = tile_end - o_base;
+    for (int o = 0; o < O; ++o) {
+        uint8_t w_val = __ldg(&W[o * CKK + c]);
+        int lut_idx = lut_row + (int)w_val;
 
-        // Load W tile
-        if (threadIdx.x < tile_size) {
-            smem_w[threadIdx.x] = W[(o_base + threadIdx.x) * CKK + c];
+        float dy_val = 0.0f;
+        float dx_val = 0.0f;
+        float dw_val = 0.0f;
+
+        if (valid) {
+            dy_val = __ldg(&dY[(n * O + o) * L + l]);
+            dx_val = __ldg(&dx_lut[lut_idx]);
+            dw_val = __ldg(&dw_lut[lut_idx]);
+
+            // grad_X: accumulate in float (sum over O, typically small)
+            grad_x_accum += dy_val * dx_val;
         }
+
+        // --- Block-level reduction for grad_W[o, c] in double ---
+        smem_reduce[threadIdx.x] = valid ? (double)(dy_val * dw_val) : 0.0;
         __syncthreads();
 
-        // Each thread computes its partial products for all o in tile
-        // and stores them in smem_reduce[t * BLOCK_SIZE + threadIdx.x]
-        for (int t = 0; t < tile_size; ++t) {
-            uint8_t w_val = smem_w[t];
-            int lut_idx = lut_row + (int)w_val;
-
-            float dy_val = 0.0f;
-            float dx_val = 0.0f;
-            float dw_val = 0.0f;
-
-            if (valid) {
-                int o = o_base + t;
-                dy_val = __ldg(&dY[(n * O + o) * L + l]);
-                dx_val = __ldg(&dx_lut[lut_idx]);
-                dw_val = __ldg(&dw_lut[lut_idx]);
-                grad_x_accum += dy_val * dx_val;
+        for (int s = BLOCK_SIZE / 2; s > 0; s >>= 1) {
+            if (threadIdx.x < s) {
+                smem_reduce[threadIdx.x] += smem_reduce[threadIdx.x + s];
             }
+            __syncthreads();
+        }
 
-            smem_reduce[t * BLOCK_SIZE + threadIdx.x] = valid ? (dy_val * dw_val) : 0.0f;
+        // One atomicAdd(double) per block per (o, c)
+        if (threadIdx.x == 0 && smem_reduce[0] != 0.0) {
+            atomicAdd(&grad_W[o * CKK + c], smem_reduce[0]);
         }
-        // Zero out unused slots
-        for (int t = tile_size; t < TILE_O; ++t) {
-            smem_reduce[t * BLOCK_SIZE + threadIdx.x] = 0.0f;
-        }
-        __syncthreads();
-
-        // Now reduce each of the tile_size rows
-        for (int t = 0; t < tile_size; ++t) {
-            float* row = &smem_reduce[t * BLOCK_SIZE];
-            for (int s = BLOCK_SIZE / 2; s > 0; s >>= 1) {
-                if (threadIdx.x < s) {
-                    row[threadIdx.x] += row[threadIdx.x + s];
-                }
-                __syncthreads();
-            }
-            if (threadIdx.x == 0) {
-                int o = o_base + t;
-                atomicAdd(&grad_W[o * CKK + c], row[0]);
-            }
-        }
-        __syncthreads();
     }
 
     if (valid) {
@@ -114,7 +93,7 @@ std::tuple<torch::Tensor, torch::Tensor> bgemm_custom_grad_uint8(
     torch::Tensor W,       // (O, CKK) uint8
     torch::Tensor dY,      // (N, O, L) float32
     torch::Tensor dx_lut,  // (256, 256) float32
-    torch::Tensor dw_lut  // (256, 256) float32
+    torch::Tensor dw_lut   // (256, 256) float32
 ) {
     TORCH_CHECK(X.is_cuda() && W.is_cuda() && dY.is_cuda());
     TORCH_CHECK(X.dtype() == torch::kUInt8);
@@ -136,23 +115,25 @@ std::tuple<torch::Tensor, torch::Tensor> bgemm_custom_grad_uint8(
     TORCH_CHECK(dY.size(0) == N && dY.size(1) == O && dY.size(2) == L);
 
     auto grad_X = torch::empty({N, CKK, L}, torch::dtype(torch::kFloat32).device(X.device()));
-    auto grad_W = torch::zeros({O, CKK}, torch::dtype(torch::kFloat32).device(W.device()));
+    // Accumulate grad_W in float64, then convert back
+    auto grad_W_f64 = torch::zeros({O, CKK}, torch::dtype(torch::kFloat64).device(W.device()));
 
     int NL = N * L;
     dim3 grid(CKK, (NL + BLOCK_SIZE - 1) / BLOCK_SIZE);
     dim3 block(BLOCK_SIZE);
 
-    auto x_ptr  = X.data_ptr<uint8_t>();
-    auto w_ptr  = W.data_ptr<uint8_t>();
-    auto dy_ptr = dY.data_ptr<float>();
-    auto dx_ptr = dx_lut.data_ptr<float>();
-    auto dw_ptr = dw_lut.data_ptr<float>();
-    auto gx_ptr = grad_X.data_ptr<float>();
-    auto gw_ptr = grad_W.data_ptr<float>();
-
     bgemm_custom_grad_uint8_kernel<<<grid, block>>>(
-        x_ptr, w_ptr, dy_ptr, dx_ptr, dw_ptr, gx_ptr, gw_ptr,
+        X.data_ptr<uint8_t>(),
+        W.data_ptr<uint8_t>(),
+        dY.data_ptr<float>(),
+        dx_lut.data_ptr<float>(),
+        dw_lut.data_ptr<float>(),
+        grad_X.data_ptr<float>(),
+        grad_W_f64.data_ptr<double>(),
         N, CKK, O, L);
+
+    // Convert grad_W back to float32 for the caller
+    auto grad_W = grad_W_f64.to(torch::kFloat32);
 
     return std::make_tuple(grad_X, grad_W);
 }
