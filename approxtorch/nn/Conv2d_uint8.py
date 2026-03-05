@@ -67,6 +67,8 @@ class _conv2d_uint8_base(Function):
                 ctx.save_for_backward(x, weight)
             case 'int_ste':
                 ctx.save_for_backward(q_x, q_w, scale_x, zero_x, scale_w, zero_w)
+            case 'custom':
+                ctx.save_for_backward(q_x, q_w, scale_x, zero_x, scale_w, zero_w)
             case _:
                 raise ValueError("Invalid gradient type")
         
@@ -96,6 +98,7 @@ class _conv2d_uint8_base(Function):
             case _:
                 raise ValueError("Invalid weight quantization method")
         output = output.view(B, O, OH, OW)
+        
         # 5. add bias
         if bias is not None:
             output = output + bias.view(1, -1, 1)
@@ -119,6 +122,64 @@ class _conv2d_uint8_ste(_conv2d_uint8_base):
 
 
 class _conv2d_uint8_int_ste(_conv2d_uint8_base):
+    @staticmethod
+    def backward(ctx, upstream_grad):
+        grad_x, grad_weight, grad_bias,  = None, None, None
+        q_x, q_w, scale_x, zero_x, scale_w, zero_w = ctx.saved_tensors
+        q_x = q_x.to(torch.float)
+        q_w = q_w.to(torch.float)
+        
+        B, O, OH, OW = ctx.output_shape
+        B, C, H, W = ctx.input_shape
+        kH, kW = ctx.kernel_size
+        L = OH * OW
+        upstream_grad = upstream_grad.view(B,O,L)
+        
+        if ctx.has_bias and ctx.needs_input_grad[10]:
+            grad_bias = upstream_grad.sum(dim=(0, 2))
+            
+        
+        if ctx.w_quantizer[2] == 'tensor':
+            # compute grad_x
+            # term1 = torch.einsum('nol,ok->nkl', upstream_grad, q_w)
+            dx_term1 = torch.matmul(q_w.t(), upstream_grad)  
+            dx_term2 = - zero_w * upstream_grad.sum(dim=1, keepdim=True)
+            grad_x = (dx_term1 + dx_term2) * scale_w # (N, CKK, L)
+            grad_x = torch.nn.functional.fold(grad_x, (H, W), ctx.kernel_size, padding=ctx.padding, stride=ctx.stride, dilation=ctx.dilation)
+            # grad_x shape is (B, C, H, W)
+            
+            # compute grad_weight
+            # dy_term1 = torch.einsum('nol,nkl->ok', upstream_grad, q_x)
+            dy_term1 = torch.bmm(upstream_grad, q_x.transpose(1, 2)).sum(dim=0) 
+            dy_term2 = - zero_x * upstream_grad
+            dy_term2 = dy_term2.sum(dim=(0, 2)).view(-1, 1)
+            grad_weight = (dy_term1 + dy_term2) * scale_x # (O, CKK)
+            grad_weight = grad_weight.view(O, C, kH, kW)
+            # grad_weight shape is (O, C, kH, kW)
+            
+        if ctx.w_quantizer[2] == 'channel':
+            # compute grad_x
+            # term1 = torch.einsum('nol,ok->nkl', upstream_grad, q_w)
+            upstream_grad_scaled = upstream_grad.view(B, O, L) * scale_w.view(1, O, 1)
+            dx_term1 = torch.matmul(q_w.t(), upstream_grad_scaled)  # (N, K, L)
+            dx_term2 = - (zero_w.view(1, O, 1) * upstream_grad_scaled).sum(dim=1, keepdim=True) # (N, 1, L)
+            grad_x = dx_term1 + dx_term2
+            grad_x = torch.nn.functional.fold(grad_x, (H, W), ctx.kernel_size, padding=ctx.padding, stride=ctx.stride, dilation=ctx.dilation)
+            # grad_x shape is (B, C, H, W)
+            
+            # compute grad_weight
+            # dy_term1 = torch.einsum('nol,nkl->ok', upstream_grad, q_x)
+            dy_term1 = torch.bmm(upstream_grad, q_x.transpose(1, 2)).sum(dim=0) 
+            dy_term2 = - zero_x * upstream_grad
+            dy_term2 = dy_term2.sum(dim=(0, 2)).view(-1, 1)
+            grad_weight = (dy_term1 + dy_term2) * scale_x # (O, CKK)
+            grad_weight = grad_weight.view(O, C, kH, kW)
+            # grad_weight shape is (O, C, kH, kW)
+        
+        return grad_x, grad_weight, None, None, None, None, None, None, None, None, grad_bias, None, None, None, None, None, None
+
+
+class _conv2d_uint8_custom(_conv2d_uint8_base):
     @staticmethod
     def backward(ctx, upstream_grad):
         grad_x, grad_weight, grad_bias,  = None, None, None
