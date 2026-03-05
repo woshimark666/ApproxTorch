@@ -186,8 +186,6 @@ class _conv2d_uint8_custom(_conv2d_uint8_base):
     def backward(ctx, upstream_grad):
         grad_x, grad_weight, grad_bias,  = None, None, None
         q_x, q_w, scale_x, zero_x, scale_w, zero_w, dx_lut, dw_lut = ctx.saved_tensors
-        q_x = q_x.to(torch.float)
-        q_w = q_w.to(torch.float)
         
         B, O, OH, OW = ctx.output_shape
         B, C, H, W = ctx.input_shape
@@ -246,7 +244,6 @@ def conv2d_uint8(x, weight, lut, grad, dx_lut, dw_lut, x_quantizer, w_quantizer,
             return _conv2d_uint8_int_ste.apply(x, weight, lut, grad, dx_lut, dw_lut, x_quantizer, w_quantizer, scale_x, zero_x, scale_w, zero_w, bias, stride, padding, dilation, groups, qmin, qmax)
         case 'custom':
             return _conv2d_uint8_custom.apply(x, weight, lut, grad, dx_lut, dw_lut, x_quantizer, w_quantizer, scale_x, zero_x, scale_w, zero_w, bias, stride, padding, dilation, groups, qmin, qmax)
-            
         case _:
             raise ValueError("Invalid gradient type")
 
@@ -312,7 +309,7 @@ class Conv2d_uint8(nn.Module):
                 self.register_buffer('scale_w', torch.tensor(1., dtype=torch.float32))
                 self.register_buffer('zero_w', torch.tensor(0., dtype=torch.float32))
                 
-        if self.grad != 'ste':
+        if self.grad == 'custom':
             self.register_buffer('grad_dx', grad_dx)
             self.register_buffer('grad_dy', grad_dy)
             
