@@ -72,7 +72,7 @@ __global__ void bgemm_custom_grad_dw_uint8_naive_kernel(
 // ===========================================================================
 // Python binding
 // ===========================================================================
-std::vector<torch::Tensor> bgemm_custom_grad_uint8_naive(
+std::tuple<torch::Tensor, torch::Tensor> bgemm_custom_grad_uint8_naive(
     torch::Tensor X,       // (N, CKK, L) uint8
     torch::Tensor W,       // (O, CKK) uint8
     torch::Tensor dY,      // (N, O, L) float32
@@ -131,7 +131,7 @@ std::vector<torch::Tensor> bgemm_custom_grad_uint8_naive(
         );
     }
 
-    return {grad_X, grad_W};
+    return std::make_tuple(grad_X, grad_W);
 }
 
 TORCH_LIBRARY_FRAGMENT(approxtorch, m){

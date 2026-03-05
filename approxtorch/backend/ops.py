@@ -56,3 +56,10 @@ def bgemm_int8(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
 
 def bgemm_uint8(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
     return torch.ops.approxtorch.bgemm_uint8.default(A, B, lut)
+
+
+def bgemm_custom_grad_uint8_naive(X: Tensor, W: Tensor, dY: Tensor, dx_lut: Tensor, dw_lut: Tensor) -> Tensor:
+    return torch.ops.approxtorch.bgemm_custom_grad_uint8_naive.default(X, W, dY, dx_lut, dw_lut)
+
+def bgemm_custom_grad_uint8(X: Tensor, W: Tensor, dY: Tensor, dx_lut: Tensor, dw_lut: Tensor) -> Tensor:
+    return torch.ops.approxtorch.bgemm_custom_grad_uint8.default(X, W, dY, dx_lut, dw_lut)
