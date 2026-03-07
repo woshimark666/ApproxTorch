@@ -18,6 +18,7 @@ cuda_functions = CUDAExtension('approxtorch.backend._C',[
         './approxtorch/backend/csrc/cuda/bgemm.cu',
         './approxtorch/backend/csrc/cuda/bgemm_custom_grad_naive.cu',
         './approxtorch/backend/csrc/cuda/bgemm_custom_grad.cu',
+        './approxtorch/backend/csrc/cuda/bgemm_custom_grad_optimize.cu',
     ],                   
     include_dirs = ['./approxtorch/backend/csrc/cuda'],
     extra_compile_args={'nvcc': ['-arch=native', '-std=c++17', "-O3"],

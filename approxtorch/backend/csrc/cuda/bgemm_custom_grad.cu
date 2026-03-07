@@ -8,143 +8,6 @@
 #define BLOCK_SIZE 256
 namespace approxtorch{
 
-// // ===========================================================================
-// // Fused kernel v3: reduce syncthreads overhead by accumulating multiple o
-// // values between reductions. Instead of reducing after every o, accumulate
-// // TILE_O partial sums per thread in registers, then reduce TILE_O times.
-// // But we need per-o sums... so we store partial sums in registers array.
-// // ===========================================================================
-// __global__ void bgemm_custom_grad_uint8_kernel(
-//     const uint8_t* __restrict__ X,      // (N, CKK, L)
-//     const uint8_t* __restrict__ W,      // (O, CKK)
-//     const float*   __restrict__ dY,     // (N, O, L)
-//     const float*   __restrict__ dx_lut, // (65536,)
-//     const float*   __restrict__ dw_lut, // (65536,)
-//     float*         __restrict__ grad_X,  // (N, CKK, L) float32
-//     double*        __restrict__ grad_W,  // (O, CKK) float64 for precision
-//     int N, int CKK, int O, int L
-// ) {
-//     int c = blockIdx.x;
-//     if (c >= CKK) return;
-
-//     int NL = N * L;
-//     int nl_base = blockIdx.y * BLOCK_SIZE;
-//     int nl = nl_base + threadIdx.x;
-
-//     int n = -1, l = -1;
-//     uint8_t x_val = 0;
-//     int lut_row = 0;
-//     bool valid = (nl < NL);
-
-//     if (valid) {
-//         n = nl / L;
-//         l = nl % L;
-//         x_val = X[(n * CKK + c) * L + l];
-//         lut_row = (int)x_val << 8;
-//     }
-
-//     // Shared memory: double for grad_W reduction
-//     __shared__ double smem_reduce[BLOCK_SIZE];
-
-//     float grad_x_accum = 0.0f;
-
-//     for (int o = 0; o < O; ++o) {
-//         uint8_t w_val = __ldg(&W[o * CKK + c]);
-//         int lut_idx = lut_row + (int)w_val;
-
-//         float dy_val = 0.0f;
-//         float dx_val = 0.0f;
-//         float dw_val = 0.0f;
-
-//         if (valid) {
-//             dy_val = __ldg(&dY[(n * O + o) * L + l]);
-//             dx_val = __ldg(&dx_lut[lut_idx]);
-//             dw_val = __ldg(&dw_lut[lut_idx]);
-
-//             // grad_X: accumulate in float (sum over O, typically small)
-//             grad_x_accum += dy_val * dx_val;
-//         }
-
-//         // --- Block-level reduction for grad_W[o, c] in double ---
-//         smem_reduce[threadIdx.x] = valid ? (double)(dy_val * dw_val) : 0.0;
-//         __syncthreads();
-
-//         for (int s = BLOCK_SIZE / 2; s > 0; s >>= 1) {
-//             if (threadIdx.x < s) {
-//                 smem_reduce[threadIdx.x] += smem_reduce[threadIdx.x + s];
-//             }
-//             __syncthreads();
-//         }
-
-//         // One atomicAdd(double) per block per (o, c)
-//         if (threadIdx.x == 0 && smem_reduce[0] != 0.0) {
-//             atomicAdd(&grad_W[o * CKK + c], smem_reduce[0]);
-//         }
-//     }
-
-//     if (valid) {
-//         grad_X[(n * CKK + c) * L + l] = grad_x_accum;
-//     }
-// }
-
-
-// std::tuple<torch::Tensor, torch::Tensor> bgemm_custom_grad_uint8(
-//     torch::Tensor X,       // (N, CKK, L) uint8
-//     torch::Tensor W,       // (O, CKK) uint8
-//     torch::Tensor dY,      // (N, O, L) float32
-//     torch::Tensor dx_lut,  // (256, 256) float32
-//     torch::Tensor dw_lut   // (256, 256) float32
-// ) {
-//     TORCH_CHECK(X.is_cuda() && W.is_cuda() && dY.is_cuda());
-//     TORCH_CHECK(X.dtype() == torch::kUInt8);
-//     TORCH_CHECK(W.dtype() == torch::kUInt8);
-//     TORCH_CHECK(dY.dtype() == torch::kFloat32);
-
-//     X = X.contiguous();
-//     W = W.contiguous();
-//     dY = dY.contiguous();
-//     dx_lut = dx_lut.contiguous().view({-1});
-//     dw_lut = dw_lut.contiguous().view({-1});
-
-//     int N   = X.size(0);
-//     int CKK = X.size(1);
-//     int L   = X.size(2);
-//     int O   = W.size(0);
-
-//     TORCH_CHECK(W.size(1) == CKK);
-//     TORCH_CHECK(dY.size(0) == N && dY.size(1) == O && dY.size(2) == L);
-
-//     auto grad_X = torch::empty({N, CKK, L}, torch::dtype(torch::kFloat32).device(X.device()));
-//     // Accumulate grad_W in float64, then convert back
-//     auto grad_W_f64 = torch::zeros({O, CKK}, torch::dtype(torch::kFloat64).device(W.device()));
-
-//     int NL = N * L;
-//     dim3 grid(CKK, (NL + BLOCK_SIZE - 1) / BLOCK_SIZE);
-//     dim3 block(BLOCK_SIZE);
-
-//     bgemm_custom_grad_uint8_kernel<<<grid, block>>>(
-//         X.data_ptr<uint8_t>(),
-//         W.data_ptr<uint8_t>(),
-//         dY.data_ptr<float>(),
-//         dx_lut.data_ptr<float>(),
-//         dw_lut.data_ptr<float>(),
-//         grad_X.data_ptr<float>(),
-//         grad_W_f64.data_ptr<double>(),
-//         N, CKK, O, L);
-
-//     // Convert grad_W back to float32 for the caller
-//     auto grad_W = grad_W_f64.to(torch::kFloat32);
-
-//     return std::make_tuple(grad_X, grad_W);
-// }
-
-// ================================================================================
-// ================================version2==============================================
-// ================================================================================
-// ================================================================================
-// ================================================================================
-
-
 #define GRAD_W_BLOCK 256
 #define GRAD_W_NL_TILE 256   // each block handles this many (n*l) elements
 #define TILE_O 32
@@ -293,7 +156,7 @@ bgemm_custom_grad_uint8(
         int threads = 256;
         int blocks = (total + threads - 1) / threads;
 
-        bgemm_custom_grad_dx_uint8_kernel<<<blocks, threads>>>(
+        bgemm_custom_grad_dx_uint8_kernel<<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
             X.data_ptr<uint8_t>(),
             W.data_ptr<uint8_t>(),
             dY.data_ptr<float>(),
@@ -311,7 +174,7 @@ bgemm_custom_grad_uint8(
         dim3 grid(grid_x, grid_y);
         dim3 block(GRAD_W_BLOCK);
 
-        bgemm_custom_grad_dw_uint8_kernel<<<grid, block>>>(
+        bgemm_custom_grad_dw_uint8_kernel<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
             X.data_ptr<uint8_t>(),
             W.data_ptr<uint8_t>(),
             dY.data_ptr<float>(),
