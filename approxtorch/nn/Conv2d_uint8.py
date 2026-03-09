@@ -21,9 +21,9 @@ class _conv2d_uint8_base(Function):
         B, C, H, W = x.shape
         O, C, kH, kW = weight.shape
         kernel_size = (kH, kW)
-        sH, sW = _pair(stride)
-        pH, pW = _pair(padding)
-        dH, dW = _pair(dilation)
+        sH, sW = stride
+        pH, pW = padding
+        dH, dW = dilation
         OH = (H + 2 * pH - dH * (kH - 1) - 1) // sH + 1
         OW = (W + 2 * pW - dW * (kW - 1) - 1) // sW + 1
         
@@ -34,9 +34,9 @@ class _conv2d_uint8_base(Function):
         ctx.kernel_size = kernel_size
         ctx.output_shape = (B, O, OH, OW)
         ctx.input_shape = x.shape
-        ctx.stride = stride
-        ctx.padding = padding
-        ctx.dilation = dilation
+        ctx.stride = (sH, sW)
+        ctx.padding = (pH, pW)
+        ctx.dilation = (dH, dW)
         ctx.groups = groups
         ctx.qmin = qmin
         ctx.qmax = qmax
@@ -45,7 +45,7 @@ class _conv2d_uint8_base(Function):
         if x_quantizer[0] == 'static':
             q_x = Q.asymmetric_static_quantize_uint8_per_tensor(x, 
                 scale_x, zero_x, qmin, qmax)
-        elif self.x_quantizer[0] == 'dynamic':
+        elif x_quantizer[0] == 'dynamic':
             pass
         
         if w_quantizer[0] == 'static':
@@ -57,7 +57,7 @@ class _conv2d_uint8_base(Function):
                     scale_w, zero_w, qmin, qmax)
             else:
                 raise ValueError("Invalid weight quantization method")
-        elif self.w_quantizer[0] == 'dynamic':
+        elif w_quantizer[0] == 'dynamic':
             pass
         
         # 2. im2col
@@ -68,42 +68,52 @@ class _conv2d_uint8_base(Function):
             case 'ste':
                 ctx.save_for_backward(x, weight)
             case 'int_ste':
-                ctx.save_for_backward(q_x, q_w, scale_x, zero_x, scale_w, zero_w)
+                ctx.save_for_backward(q_x, q_w)
+                ctx.scale_x = scale_x
+                ctx.zero_x = zero_x
+                ctx.scale_w = scale_w
+                ctx.zero_w = zero_w
             case 'custom':
-                ctx.save_for_backward(q_x, q_w, scale_x, zero_x, scale_w, zero_w, dx_lut, dw_lut)
+                ctx.save_for_backward(q_x, q_w)
+                ctx.dx_lut = dx_lut
+                ctx.dw_lut = dw_lut
+                ctx.scale_x = scale_x
+                ctx.zero_x = zero_x
+                ctx.scale_w = scale_w
+                ctx.zero_w = zero_w
             case _:
                 raise ValueError("Invalid gradient type")
         
         # 3. bgemm
         output = at.backend.ops.bgemm_uint8(q_x, q_w, lut)
         output = output.to(torch.float)
-        q_x = q_x.to(torch.float)
-        q_w = q_w.to(torch.float)
+        sum_w = q_w.sum(dim=1, dtype=torch.float32).view(1, -1, 1)
+        sum_x = q_x.sum(dim=1, keepdim=True, dtype=torch.float32)
         # 4. de-quantization
         match w_quantizer[2]:
             case 'tensor':
                 # q_x (N, CKK, L)
                 # q_w (O, CKK)
                 # output (N, O, L)
-                output = output - zero_x * q_w.sum(dim=1).view(1, -1, 1) - \
-                    zero_w * q_x.sum(dim=1, keepdim=True) + zero_x * zero_w * C * kH * kW
+                output = output - zero_x * sum_w - \
+                    zero_w * sum_x + zero_x * zero_w * C * kH * kW
                 output = output * scale_x * scale_w
             case 'channel':
                 # q_x (N, CKK, L)
                 # q_w (O, CKK)
                 # output (N, O, L)
                 # scale_w (O,) zero_w (O,)
-                output = output - zero_x * q_w.sum(dim=1).view(1, -1, 1) - \
-                    zero_w.view(1, O, 1) * q_x.sum(dim=1, keepdim=True) + \
+                output = output - zero_x * sum_w - \
+                    zero_w.view(1, O, 1) * sum_x + \
                     zero_x * zero_w.view(1, O, 1) * C * kH * kW
-                output = output * scale_x * scale_w.view(-1, O, 1)
+                output = output * scale_x * scale_w.view(1, O, 1)
             case _:
                 raise ValueError("Invalid weight quantization method")
         output = output.view(B, O, OH, OW)
         
         # 5. add bias
         if bias is not None:
-            output = output + bias.view(1, -1, 1)
+            output = output + bias.view(1, -1, 1, 1)
         
         return output
 
@@ -114,7 +124,7 @@ class _conv2d_uint8_ste(_conv2d_uint8_base):
     def backward(ctx, upstream_grad):
         grad_x, grad_weight, grad_bias = None, None, None
         x, weight = ctx.saved_tensors
-        if ctx.has_bias and ctx.needs_input_grad[10]:
+        if ctx.has_bias and ctx.needs_input_grad[12]:
             grad_bias = upstream_grad.sum(dim=(0, 2, 3))
             
             
@@ -126,18 +136,19 @@ class _conv2d_uint8_ste(_conv2d_uint8_base):
 class _conv2d_uint8_int_ste(_conv2d_uint8_base):
     @staticmethod
     def backward(ctx, upstream_grad):
-        grad_x, grad_weight, grad_bias,  = None, None, None
-        q_x, q_w, scale_x, zero_x, scale_w, zero_w = ctx.saved_tensors
+        grad_x, grad_weight, grad_bias  = None, None, None
+        q_x, q_w= ctx.saved_tensors
         q_x = q_x.to(torch.float)
         q_w = q_w.to(torch.float)
-        
+        scale_x, zero_x, scale_w, zero_w = ctx.scale_x, ctx.zero_x, ctx.scale_w, ctx.zero_w
+    
         B, O, OH, OW = ctx.output_shape
         B, C, H, W = ctx.input_shape
         kH, kW = ctx.kernel_size
         L = OH * OW
         upstream_grad = upstream_grad.view(B,O,L)
         
-        if ctx.has_bias and ctx.needs_input_grad[10]:
+        if ctx.has_bias and ctx.needs_input_grad[12]:
             grad_bias = upstream_grad.sum(dim=(0, 2))
             
         
@@ -152,7 +163,7 @@ class _conv2d_uint8_int_ste(_conv2d_uint8_base):
             
             # compute grad_weight
             # dy_term1 = torch.einsum('nol,nkl->ok', upstream_grad, q_x)
-            dy_term1 = torch.bmm(upstream_grad, q_x.transpose(1, 2)).sum(dim=0) 
+            dy_term1 = torch.bmm(upstream_grad, q_x.transpose(1, 2).contiguous()).sum(dim=0) 
             dy_term2 = - zero_x * upstream_grad
             dy_term2 = dy_term2.sum(dim=(0, 2)).view(-1, 1)
             grad_weight = (dy_term1 + dy_term2) * scale_x # (O, CKK)
@@ -171,7 +182,7 @@ class _conv2d_uint8_int_ste(_conv2d_uint8_base):
             
             # compute grad_weight
             # dy_term1 = torch.einsum('nol,nkl->ok', upstream_grad, q_x)
-            dy_term1 = torch.bmm(upstream_grad, q_x.transpose(1, 2)).sum(dim=0) 
+            dy_term1 = torch.bmm(upstream_grad, q_x.transpose(1, 2).contiguous()).sum(dim=0) 
             dy_term2 = - zero_x * upstream_grad
             dy_term2 = dy_term2.sum(dim=(0, 2)).view(-1, 1)
             grad_weight = (dy_term1 + dy_term2) * scale_x # (O, CKK)
@@ -184,8 +195,10 @@ class _conv2d_uint8_int_ste(_conv2d_uint8_base):
 class _conv2d_uint8_custom(_conv2d_uint8_base):
     @staticmethod
     def backward(ctx, upstream_grad):
-        grad_x, grad_weight, grad_bias,  = None, None, None
-        q_x, q_w, scale_x, zero_x, scale_w, zero_w, dx_lut, dw_lut = ctx.saved_tensors
+        grad_x, grad_weight, grad_bias = None, None, None
+        q_x, q_w = ctx.saved_tensors
+        scale_x, zero_x, scale_w, zero_w = ctx.scale_x, ctx.zero_x, ctx.scale_w, ctx.zero_w
+        dx_lut, dw_lut = ctx.dx_lut, ctx.dw_lut
         
         B, O, OH, OW = ctx.output_shape
         B, C, H, W = ctx.input_shape
@@ -193,20 +206,22 @@ class _conv2d_uint8_custom(_conv2d_uint8_base):
         L = OH * OW
         upstream_grad = upstream_grad.view(B,O,L)
         
-        if ctx.has_bias and ctx.needs_input_grad[10]:
+        if ctx.has_bias and ctx.needs_input_grad[12]:
             grad_bias = upstream_grad.sum(dim=(0, 2))
             
         
         if ctx.w_quantizer[2] == 'tensor':
             # compute grad_x
             # dx_term1 = torch.matmul(q_w.t(), upstream_grad)  
-            dx_term1, dy_term1 = at.backend.ops.bgemm_custom_grad_uint8(X=q_x, W=q_w, dY=upstream_grad, dx_lut=dx_lut, dw_lut=dw_lut)
+            # dx_term1, dy_term1 = at.backend.ops.bgemm_custom_grad_uint8(X=q_x, W=q_w, dY=upstream_grad, dx_lut=dx_lut, dw_lut=dw_lut)
+            dx_term1 = at.backend.ops.bgemm_custom_grad_uint8_dx(q_x, q_w, upstream_grad, dx_lut)
             dx_term2 = - zero_w * upstream_grad.sum(dim=1, keepdim=True)
             grad_x = (dx_term1 + dx_term2) * scale_w # (N, CKK, L)
             grad_x = torch.nn.functional.fold(grad_x, (H, W), ctx.kernel_size, padding=ctx.padding, stride=ctx.stride, dilation=ctx.dilation)
             # grad_x shape is (B, C, H, W)
             
             # compute grad_weight
+            dy_term1 = at.backend.ops.bgemm_custom_grad_uint8_dw(q_x, q_w, upstream_grad, dw_lut)
             dy_term2 = - zero_x * upstream_grad
             dy_term2 = dy_term2.sum(dim=(0, 2)).view(-1, 1)
             grad_weight = (dy_term1 + dy_term2) * scale_x # (O, CKK)
@@ -218,7 +233,8 @@ class _conv2d_uint8_custom(_conv2d_uint8_base):
             # term1 = torch.einsum('nol,ok->nkl', upstream_grad, q_w)
             upstream_grad_scaled = upstream_grad.view(B, O, L) * scale_w.view(1, O, 1)
             # dx_term1 = torch.matmul(q_w.t(), upstream_grad_scaled)  # (N, K, L)
-            dx_term1, dy_term1 = at.backend.ops.bgemm_custom_grad_uint8(X=q_x, W=q_w, dY=upstream_grad_scaled, dx_lut=dx_lut, dw_lut=dw_lut)
+            dx_term1 = at.backend.ops.bgemm_custom_grad_uint8_dx(q_x, q_w, upstream_grad_scaled, dx_lut)
+
             dx_term2 = - (zero_w.view(1, O, 1) * upstream_grad_scaled).sum(dim=1, keepdim=True) # (N, 1, L)
             grad_x = dx_term1 + dx_term2
             grad_x = torch.nn.functional.fold(grad_x, (H, W), ctx.kernel_size, padding=ctx.padding, stride=ctx.stride, dilation=ctx.dilation)
@@ -227,6 +243,7 @@ class _conv2d_uint8_custom(_conv2d_uint8_base):
             # compute grad_weight
             # dy_term1 = torch.einsum('nol,nkl->ok', upstream_grad, q_x)
             # dy_term1 = torch.bmm(upstream_grad, q_x.transpose(1, 2)).sum(dim=0) 
+            dy_term1 = at.backend.ops.bgemm_custom_grad_uint8_dw(q_x, q_w, upstream_grad_scaled, dw_lut)
             dy_term2 = - zero_x * upstream_grad
             dy_term2 = dy_term2.sum(dim=(0, 2)).view(-1, 1)
             grad_weight = (dy_term1 + dy_term2) * scale_x # (O, CKK)
@@ -312,7 +329,9 @@ class Conv2d_uint8(nn.Module):
         if self.grad == 'custom':
             self.register_buffer('grad_dx', grad_dx)
             self.register_buffer('grad_dy', grad_dy)
-            
+        else:
+            self.grad_dx = None
+            self.grad_dy = None
     
     def __repr__(self):
         return f"Conv2d_uint8(in_channels={self.in_channels}, out_channels={self.out_channels}, " \
