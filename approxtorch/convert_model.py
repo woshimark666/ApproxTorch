@@ -60,9 +60,25 @@ def convert_model(model,
                         groups = groups
                     )
                 case 'int8':
-                    pass
+                    new_module = Conv2d_int8(
+                            in_channels = in_channels,
+                            out_channels = out_channels,
+                            kernel_size = kernel_size,
+                            lut = lut,
+                            x_quantizer = x_quantizer,
+                            w_quantizer = w_quantizer,
+                            grad = grad,
+                            grad_dx = grad_dx,
+                            grad_dy = grad_dy,
+                            bias = bias,
+                            stride = stride,
+                            padding = padding,
+                            dilation = dilation,
+                            groups = groups
+                    
+                    )
             modules_to_replace.append((name, new_module))
- 
+
         
     for name, new_module in modules_to_replace:
         parent_name, attr_name = name.rsplit('.', 1) if '.' in name else ('', name)
