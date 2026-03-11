@@ -303,7 +303,7 @@ class Conv2d_int8(nn.Module):
     
     def forward(self, x: torch.Tensor):
             
-        output = conv2d_uint8(x, self.weight, self.lut, self.grad, self.grad_dx, self.grad_dy, self.x_quantizer, self.w_quantizer,
+        output = conv2d_int8(x, self.weight, self.lut, self.grad, self.grad_dx, self.grad_dy, self.x_quantizer, self.w_quantizer,
                                 self.scale_x, self.zero_x, self.scale_w, self.zero_w, self.bias,
                                 self.stride, self.padding, self.dilation, self.groups, self.qmin, self.qmax)
         
