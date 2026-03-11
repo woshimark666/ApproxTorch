@@ -61,9 +61,9 @@ class _conv2d_int8_base(Function):
             
         match w_quantizer:
             case ('dynamic', 'symmetric', 'tensor'):
-                q_w, scale_w, zero_w = Q.symmetric_dynamic_quantize_int8_per_tensor(x, qmin, qmax)
+                q_w, scale_w, zero_w = Q.symmetric_dynamic_quantize_int8_per_tensor(weight, qmin, qmax)
             case ('dynamic', 'symmetric', 'channel'):
-                q_w, scale_w, zero_w = Q.symmetric_dynamic_quantize_int8_per_channel(x, qmin, qmax)
+                q_w, scale_w, zero_w = Q.symmetric_dynamic_quantize_int8_per_channel(weight, qmin, qmax)
             case _:
                 raise ValueError("quantization method for w is not supported")
         
@@ -101,6 +101,7 @@ class _conv2d_int8_base(Function):
                 output = output * scale_x * scale_w
                 
             case ('symmetric', 'channel'):
+                # output (N, O, L), scale_x (), scale should be (1, O, 1)
                 output = output * scale_x * scale_w.view(1, -1, 1)
                 
             case _:
