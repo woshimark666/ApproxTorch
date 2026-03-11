@@ -44,13 +44,15 @@ def symmetric_dynamic_quantize_int8_per_tensor(x, qmin, qmax):
     absmax = torch.max(torch.abs(x))
     s = absmax / float((qmax - qmin)/2)
     q = torch.round(x / s).clamp(qmin, qmax)
-    return q.to(torch.int8), s
+    z = None
+    return q.to(torch.int8), s, z
 
 def symmetric_dynamic_quantize_int8_per_channel(x, qmin, qmax):
     absmax = torch.amax(torch.abs(x), dim=(1,2,3), keepdim=True)
     s = absmax / float((qmax - qmin)/2)
     q = torch.round(x / s).clamp(qmin, qmax)
-    return q.to(torch.int8), s.view(-1)
+    z = None    
+    return q.to(torch.int8), s.view(-1), z
 
 
 

@@ -243,7 +243,7 @@ class _conv2d_uint8_custom(_conv2d_uint8_base):
             # compute grad_weight
             # dy_term1 = torch.einsum('nol,nkl->ok', upstream_grad, q_x)
             # dy_term1 = torch.bmm(upstream_grad, q_x.transpose(1, 2)).sum(dim=0) 
-            dy_term1 = at.backend.ops.bgemm_custom_grad_uint8_dw(q_x, q_w, upstream_grad_scaled, dw_lut)
+            dy_term1 = at.backend.ops.bgemm_custom_grad_uint8_dw(q_x, q_w, upstream_grad, dw_lut)
             dy_term2 = - zero_x * upstream_grad
             dy_term2 = dy_term2.sum(dim=(0, 2)).view(-1, 1)
             grad_weight = (dy_term1 + dy_term2) * scale_x # (O, CKK)
