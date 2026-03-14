@@ -20,17 +20,18 @@ def load_lut(file_path, qtype: Literal['int8', 'int4', 'uint8'] = 'int8'):
 
 
     
-def load_lre_grad_lut(file_path):
-    lut_array = np.loadtxt(file_path, dtype=np.float32).reshape(256, 2)
-    lut_tensor = torch.tensor(lut_array)
-    lut_tensor.requires_grad_(False)
+def load_lre_grad_lut(da_file_path, db_file_path):
     
-    grad_lut_dx = lut_tensor[:, 0]
-    grad_lut_dy = lut_tensor[:, 1]
-    grad_lut_dx = grad_lut_dx.contiguous()
-    grad_lut_dy = grad_lut_dy.contiguous()
-    grad_lut = (grad_lut_dx, grad_lut_dy)
-    return grad_lut   
+    da_lut = np.loadtxt(da_file_path, dtype=np.float32)
+    db_lut = np.loadtxt(db_file_path, dtype=np.float32)
+    
+    da_lut = torch.tensor(da_lut)
+    db_lut = torch.tensor(db_lut)
+    da_lut = da_lut.view(-1)
+    db_lut = db_lut.view(-1)
+    da_lut.requires_grad_(False)
+    db_lut.requires_grad_(False)
+    return da_lut, db_lut
 
 
     

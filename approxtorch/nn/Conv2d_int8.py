@@ -88,6 +88,15 @@ class _conv2d_int8_base(Function):
                 ctx.zero_x = zero_x
                 ctx.scale_w = scale_w
                 ctx.zero_w = zero_w
+                
+            case 'lre':
+                ctx.save_for_backward(q_x, q_w)
+                ctx.dx_lut = dx_lut
+                ctx.dw_lut = dw_lut
+                ctx.scale_x = scale_x
+                ctx.zero_x = zero_x
+                ctx.scale_w = scale_w
+                ctx.zero_w = zero_w
             case _:
                 raise ValueError("Invalid gradient type")
         
@@ -175,8 +184,50 @@ class _conv2d_int8_int_ste(_conv2d_int8_base):
         
         return grad_x, grad_weight, None, None, None, None, None, None, None, None, None, None, grad_bias, None, None, None, None, None, None
 
+class _conv2d_int8_lre(_conv2d_int8_base):
+    @staticmethod
+    def backward(ctx, upstream_grad):
+        grad_x, grad_weight, grad_bias  = None, None, None
+        q_x, q_w= ctx.saved_tensors
+        scale_x, zero_x, scale_w, zero_w = ctx.scale_x, ctx.zero_x, ctx.scale_w, ctx.zero_w
+    
+        B, O, OH, OW = ctx.output_shape
+        B, C, H, W = ctx.input_shape
+        kH, kW = ctx.kernel_size
+        L = OH * OW
+        upstream_grad = upstream_grad.view(B,O,L)
+        
+        if ctx.has_bias and ctx.needs_input_grad[12]:
+            grad_bias = upstream_grad.sum(dim=(0, 2))
+            
+        
+        # upstream_grad (N, O, L)
+        # q_x (N, CKK, L)
+        # q_w (O, CKK)
+        match (ctx.x_quantizer[1], ctx.w_quantizer[2]):
+            case ('symmetric', 'tensor'):
+                # grad_x 
+                grad_x = torch.matmul(q_w.t(), upstream_grad * scale_w) # (N, CKK, L)
+                grad_x = torch.nn.functional.fold(grad_x, (H, W), ctx.kernel_size, padding=ctx.padding, stride=ctx.stride, dilation=ctx.dilation) # (N, C, H, W)
+                
+                # grad_weight
+                grad_weight = torch.matmul(upstream_grad * scale_x, q_x.transpose(1, 2).contiguous()) # (N, O, CKK)
+                grad_weight = grad_weight.sum(dim=0) # (O, CKK)
+                grad_weight = grad_weight.view(O, C, kH, kW)
+                
+            case ('symmetric', 'channel'):
+                grad_x = torch.matmul(q_w.t(), upstream_grad * scale_w.view(1, -1, 1)) # (N, CKK, L)
+                grad_x = torch.nn.functional.fold(grad_x, (H, W), ctx.kernel_size, padding=ctx.padding, stride=ctx.stride, dilation=ctx.dilation) # (N, C, H, W)
+                
+                # grad_weight
+                grad_weight = torch.matmul(upstream_grad * scale_x, q_x.transpose(1, 2).contiguous()) # (N, O, CKK)
+                grad_weight = grad_weight.sum(dim=0) # (O, CKK)
+                grad_weight = grad_weight.view(O, C, kH, kW)
+            case _:
+                raise ValueError("Invalid quantization method")
+        
+        return grad_x, grad_weight, None, None, None, None, None, None, None, None, None, None, grad_bias, None, None, None, None, None, None
 
-# todo 
 class _conv2d_int8_custom(_conv2d_int8_base):
     @staticmethod
     def backward(ctx, upstream_grad):

@@ -80,3 +80,7 @@ def bgemm_custom_grad_int8_dx(X: Tensor, W: Tensor, dY: Tensor, dx_lut: Tensor) 
 
 def bgemm_custom_grad_int8_dw(X: Tensor, W: Tensor, dY: Tensor, dW_lut: Tensor) -> Tensor:
     return torch.ops.approxtorch.bgemm_custom_grad_int8_dw.default(X, W, dY, dW_lut)
+
+
+def lut_lookup_int8(x: Tensor, lut: Tensor) -> Tensor:
+    return torch.ops.approxtorch.lut_lookup_int8.default(x, lut)
