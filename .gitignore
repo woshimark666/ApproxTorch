@@ -6,6 +6,3 @@ test/
 dist/
 *.so
 .clangd
-prompt.txt
-
-create_ramdisk.sh
