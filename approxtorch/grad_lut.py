@@ -157,11 +157,7 @@ def _diff_grad(lut, smooth, half_ws, axis):
         # grad_b: derivative along b (col direction)
         for a in range(256):
             line = smooth[a, :]
-            max_val = np.max(lut[a, :])
-            min_val = np.min(lut[a, :])
-            fallback_grad = (max_val - min_val) / 256
-            if a <=128:
-                fallback_grad = - fallback_grad
+            fallback_grad = (line[-1] - line[0]) / 255.0
             for b in range(256):
                 if b > half_ws and b < 255 - half_ws:
                     # Eq. 5: central difference
@@ -174,11 +170,7 @@ def _diff_grad(lut, smooth, half_ws, axis):
         # grad_a: derivative along a (row direction)
         for b in range(256):
             line = smooth[:, b]
-            max_val = np.max(lut[:, b])
-            min_val = np.min(lut[:, b])
-            fallback_grad = (max_val - min_val) / 256
-            if b <=128:
-                fallback_grad = - fallback_grad
+            fallback_grad = (line[-1] - line[0]) / 255.0
             for a in range(256):
                 if a > half_ws and a < 255 - half_ws:
                     # Eq. 5: central difference
