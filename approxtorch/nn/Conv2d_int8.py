@@ -291,6 +291,8 @@ def conv2d_int8(x, weight, lut, grad, dx_lut, dw_lut, x_quantizer, w_quantizer, 
             return _conv2d_int8_custom.apply(x, weight, lut, grad, dx_lut, dw_lut, x_quantizer, w_quantizer, scale_x, zero_x, scale_w, zero_w, bias, stride, padding, dilation, groups, qmin, qmax)
         case 'lre':
             return _conv2d_int8_lre.apply(x, weight, lut, grad, dx_lut, dw_lut, x_quantizer, w_quantizer, scale_x, zero_x, scale_w, zero_w, bias, stride, padding, dilation, groups, qmin, qmax)
+        case 'date':
+            pass
         case _:
             raise ValueError("Invalid gradient type")
 
