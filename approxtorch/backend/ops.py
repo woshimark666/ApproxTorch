@@ -3,8 +3,14 @@ from torch import Tensor
 from torch.nn.modules.utils import _pair
 
 
-__all__ = ['im2col_int8', 'im2col_uint8', 'gemm_int8', 'gemm_uint8',
-           'gemm_int8_naive', 'bgemm_int8', 'bgemm_uint8']
+__all__ = ['im2col_int8', 
+           'im2col_uint8', 
+           'gemm_int8', 
+           'gemm_uint8',
+           'gemm_int8_naive', 
+           'bgemm_int8', 
+           'bgemm_uint8', 
+           'bgemm_gradual_approx_int8']
 
 def im2col_int8(feature: Tensor, kernel_size, stride=1, padding=0, dilation=1) -> Tensor:
     kernel_size = _pair(kernel_size)
@@ -84,3 +90,7 @@ def bgemm_custom_grad_int8_dw(X: Tensor, W: Tensor, dY: Tensor, dW_lut: Tensor) 
 
 def lut_lookup_int8(x: Tensor, lut: Tensor) -> Tensor:
     return torch.ops.approxtorch.lut_lookup_int8.default(x, lut)
+
+
+def bgemm_gradual_approx_int8(X: Tensor, W: Tensor, lut: Tensor, alpha: float) -> Tensor:
+    return torch.ops.approxtorch.bgemm_gradual_approx_int8.default(X, W, lut, alpha)
