@@ -263,13 +263,13 @@ def conv2d_int8(x, weight, lut, grad, dx_lut, dw_lut, x_quantizer, w_quantizer, 
     
     match grad:
         case 'ste':
-            return _conv2d_int8_ste.apply(x, weight, lut, grad, dx_lut, dw_lut, x_quantizer, w_quantizer, scale_x, zero_x, scale_w, zero_w, bias, stride, padding, dilation, groups, qmin, qmax)
+            return _conv2d_int8_ste.apply(x, weight, lut, grad, dx_lut, dw_lut, x_quantizer, w_quantizer, scale_x, zero_x, bias, stride, padding, dilation, groups, qmin, qmax)
         # case 'int_ste':
         #     return _conv2d_int8_int_ste.apply(x, weight, lut, grad, dx_lut, dw_lut, x_quantizer, w_quantizer, scale_x, zero_x, scale_w, zero_w, bias, stride, padding, dilation, groups, qmin, qmax)
         case 'custom':
-            return _conv2d_int8_custom.apply(x, weight, lut, grad, dx_lut, dw_lut, x_quantizer, w_quantizer, scale_x, zero_x, scale_w, zero_w, bias, stride, padding, dilation, groups, qmin, qmax)
+            return _conv2d_int8_custom.apply(x, weight, lut, grad, dx_lut, dw_lut, x_quantizer, w_quantizer, scale_x, zero_x, bias, stride, padding, dilation, groups, qmin, qmax)
         case 'lre':
-            return _conv2d_int8_lre.apply(x, weight, lut, grad, dx_lut, dw_lut, x_quantizer, w_quantizer, scale_x, zero_x, scale_w, zero_w, bias, stride, padding, dilation, groups, qmin, qmax)
+            return _conv2d_int8_lre.apply(x, weight, lut, grad, dx_lut, dw_lut, x_quantizer, w_quantizer, scale_x, zero_x, bias, stride, padding, dilation, groups, qmin, qmax)
         case 'date':
             pass
         case _:
