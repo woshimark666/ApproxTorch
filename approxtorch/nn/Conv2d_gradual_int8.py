@@ -183,6 +183,10 @@ class Conv2d_gradual_int8(nn.Module):
             new_scale = self.scale_momentum * current_scale + (1 - self.scale_momentum) * self.scale_x
             self.scale_x.copy_(new_scale)
 
+
+    def update_alpha(self, alpha):
+        self.alpha = alpha
+
     def forward(self, x: torch.Tensor):
         
         if self.update_scale:
