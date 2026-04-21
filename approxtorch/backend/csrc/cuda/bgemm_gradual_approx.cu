@@ -206,7 +206,7 @@ __global__ void approx_bgemm_kernel_gradual_int8(
 // ==========================================================
 //  Host 接口
 // ==========================================================
-torch::Tensor approx_bgemm_int8_gradual(
+torch::Tensor bgemm_gradual_int8(
     const torch::Tensor &user_A,
     const torch::Tensor &user_B,
     const torch::Tensor &lut,
@@ -256,8 +256,15 @@ torch::Tensor approx_bgemm_int8_gradual(
     return C;
 }
 
+
+TORCH_LIBRARY_FRAGMENT(approxtorch, m){
+    // m.def("im2col_uint8(Tensor input, int k_h, int k_w, int stride_h, int stride_w, int padding_h, int padding_w, int dilation_h, int dilation_w) -> Tensor");
+    m.def("bgemm_gradual_int8(Tensor user_A, Tensor user_B, Tensor lut, float alpha) -> Tensor");
+}
+
+
 TORCH_LIBRARY_IMPL(approxtorch, CUDA, m) {
-    m.impl("bgemm_int8_gradual", &approx_bgemm_int8_gradual);
+    m.impl("bgemm_gradual_int8", &bgemm_gradual_int8);
 }
 
 } // namespace approxtorch

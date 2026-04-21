@@ -16,6 +16,8 @@ from .convert_model import to_qat_int8, convert_model
 from . import load_lut
 from .grad_lut import lre, BQSG
 from . import calib
+
+from . import utils
 # # load LUT utils
 # from .load_lut import load_lut, load_lre_grad_lut, load_custom_grad_lut, load_half_custom_grad_lut
 

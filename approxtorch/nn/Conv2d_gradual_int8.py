@@ -49,6 +49,8 @@ class _conv2d_int8_gradual_base(Function):
         ctx.qmin = qmin
         ctx.qmax = qmax
         
+        ctx.save_for_backward(x, weight)
+
         # 1. quantization
         if x_quantizer == 'symmetric':
             q_x = Q.symmetric_static_quantize_int8_per_tensor(x, scale_x, zero_x, qmin, qmax)
@@ -69,7 +71,7 @@ class _conv2d_int8_gradual_base(Function):
         
         
         # 3. bgemm
-        output = at.backend.ops.bgemm_gradual_approx_int8(q_x, q_w, lut, alpha)
+        output = at.backend.ops.bgemm_gradual_int8(q_x, q_w, lut, alpha)
 
         # 4. de-quantization
         match (x_quantizer, w_quantizer):

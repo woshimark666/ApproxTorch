@@ -92,5 +92,5 @@ def lut_lookup_int8(x: Tensor, lut: Tensor) -> Tensor:
     return torch.ops.approxtorch.lut_lookup_int8.default(x, lut)
 
 
-def bgemm_gradual_approx_int8(X: Tensor, W: Tensor, lut: Tensor, alpha: float) -> Tensor:
-    return torch.ops.approxtorch.bgemm_gradual_approx_int8.default(X, W, lut, alpha)
+def bgemm_gradual_int8(X: Tensor, W: Tensor, lut: Tensor, alpha: float) -> Tensor:
+    return torch.ops.approxtorch.bgemm_gradual_int8.default(X, W, lut, alpha)
