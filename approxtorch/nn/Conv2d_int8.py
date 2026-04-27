@@ -369,7 +369,7 @@ class Conv2d_int8(nn.Module):
 
     def forward(self, x: torch.Tensor):
         
-        if self.update_scale:
+        if self.update_scale and self.training:
             self._update_scale(x)
 
         output = conv2d_int8(x, self.weight, self.lut, self.grad, self.grad_dx, self.grad_dy, 

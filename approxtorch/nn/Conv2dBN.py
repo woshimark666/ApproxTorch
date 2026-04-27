@@ -287,7 +287,6 @@ class Conv2d_BN_int8(nn.Module):
                  grad: str = 'ste',
                  grad_dx: torch.Tensor | None = None,
                  grad_dy: torch.Tensor | None = None,
-                 bias: torch.Tensor | None = None,
                  stride: int | tuple[int, int] = 1,
                  padding: int | tuple[int, int] = 0,
                  dilation: int | tuple[int, int] = 1,
@@ -316,6 +315,7 @@ class Conv2d_BN_int8(nn.Module):
         self.register_buffer('lut', lut)
         # weight
         self.weight = nn.Parameter(torch.Tensor(self.out_channels, self.in_channels, self.kernel_size[0], self.kernel_size[1]))
+        self.bias = nn.Parameter(torch.Tensor(self.out_channels))
         # quantization parameters
         
         match x_quantizer:
@@ -330,15 +330,7 @@ class Conv2d_BN_int8(nn.Module):
         self.register_buffer('scale_w', torch.tensor(1.0))
         self.zero_w = None  # 占个位置 没用
 
-        # bias
-        if isinstance(bias, torch.Tensor):
-            self.bias = nn.Parameter(bias)
-        elif bias == True:
-            self.bias = nn.Parameter(torch.Tensor(self.out_channels))
-        elif bias == False or bias == None:
-            self.bias = None
-        else:
-            raise ValueError("Invalid bias type")
+
 
         if self.grad == 'custom' or self.grad == 'lre':
             self.register_buffer('grad_dx', grad_dx)
@@ -369,7 +361,7 @@ class Conv2d_BN_int8(nn.Module):
 
     def forward(self, x: torch.Tensor):
         
-        if self.update_scale:
+        if self.update_scale and self.training:
             self._update_scale(x)
 
         output = conv2d_bn_int8(x, self.weight, self.lut, self.grad, self.grad_dx, self.grad_dy, 
