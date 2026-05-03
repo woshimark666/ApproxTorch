@@ -1,8 +1,9 @@
 import torch
-from . import quantizer as Q
+from . import fakequant
 import approxtorch as at
 import torch.nn as nn
 from torch.nn.modules.utils import _pair
+from . import bgemm
 
 class Conv2d_int8(nn.Module): 
     def __init__(self,
@@ -11,7 +12,7 @@ class Conv2d_int8(nn.Module):
                  kernel_size: int | tuple[int, int], 
                  lut: torch.Tensor,
                  x_quantizer:str = 'symmetric',
-                 w_quantizer:str = 'asymmetric',
+                 w_quantizer:str = 'symmetric',
                  grad: str = 'ste',
                  grad_dx: torch.Tensor | None = None,
                  grad_dy: torch.Tensor | None = None,
@@ -76,7 +77,7 @@ class Conv2d_int8(nn.Module):
             self.grad_dy = None
 
     def __repr__(self):
-        return f"Conv2d_int8(in_channels={self.in_channels}, out_channels={self.out_channels}, kernel_size={self.kernel_size}, "\
+        return f"Conv2d_int8_decoupled(in_channels={self.in_channels}, out_channels={self.out_channels}, kernel_size={self.kernel_size}, "\
                 f"stride={self.stride}, padding={self.padding}, dilation={self.dilation}, groups={self.groups}, " \
                 f"x_quantizer={self.x_quantizer}, w_quantizer={self.w_quantizer}, grad={self.grad})"
     
@@ -96,13 +97,39 @@ class Conv2d_int8(nn.Module):
 
 
     def forward(self, x: torch.Tensor):
-        
-        if self.update_scale and self.training:
-            self._update_scale(x)
 
-        output = conv2d_int8(x, self.weight, self.lut, self.grad, self.grad_dx, self.grad_dy, 
-                            self.x_quantizer, self.w_quantizer, 
-                            self.scale_x, self.zero_x, self.scale_w, self.zero_w, self.bias,
-                            self.stride, self.padding, self.dilation, self.groups, self.qmin, self.qmax)
+        # 0. compute output shape 
+        B, C, H, W = x.shape
+        O, C, kH, kW = self.weight.shape
+        kernel_size = (kH, kW)
+        sH, sW = self.stride
+        pH, pW = self.padding
+        dH, dW = self.dilation
+        OH = (H + 2 * pH - dH * (kH - 1) - 1) // sH + 1
+        OW = (W + 2 * pW - dW * (kW - 1) - 1) // sW + 1
         
-        return output
+        # 1. do quantization first 
+        x = fakequant.symmetric_static_quantize_int8_per_tensor(x, self.scale_x, None, self.qmin, self.qmax)
+        w, s_w = fakequant.symmetric_dynamic_quantize_int8_per_channel(self.weight, self.qmin, self.qmax)
+        
+        # 2. im2col shape transform
+        x = torch.nn.functional.unfold(x, self.kernel_size, dilation=self.dilation, padding=self.padding, stride=self.stride) # (N, CKK, L)
+        w = w.view(self.out_channels, -1) # (O, CKK)
+
+        # 3. bgemm
+        match self.grad:
+            case 'ste':
+                y = bgemm.bgemm_int8_ste(x, w, self.lut)
+                # y [N, O, L]]
+            case 'lre':
+                raise NotImplementedError("lre gradient is not implemented yet")
+            case 'custom':
+                raise NotImplementedError("custom gradient is not implemented yet")
+            case _:
+                raise ValueError("Invalid gradient method")
+
+        # 4. reshape and de-quantization
+        y = y.view(B, O, OH, OW)
+        y = y * self.scale_x * s_w.view(1, -1, 1, 1)
+
+        return 

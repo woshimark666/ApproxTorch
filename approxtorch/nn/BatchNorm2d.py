@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-import approxtorch.nn.FakeQuant as fq
+import approxtorch.nn.fakequant as fq
 
 
 class BatchNorm2dRequant(nn.Module):
