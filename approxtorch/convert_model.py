@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from approxtorch.nn import Conv2d_int8, Conv2d_uint8, Conv2d_gradual_int8
-# from approxtorch.new_nn import Conv2d_uint8_STE, Conv2d_uint8_custom 
+from approxtorch.nn import Conv2d_int8_decoupled
 from typing import Literal
 
 # this function convert the model into approximate model
@@ -17,7 +17,7 @@ def to_qat_int8(
         conv_only: bool = True,
         ignore_first_conv: bool = True,
         scale_momentum: float = 0.05,
-        gradual_approx: bool = False
+        decoupled: bool = False
         ):
     
     modules_to_replace = []
@@ -39,8 +39,8 @@ def to_qat_int8(
             bias = module.bias
             groups = module.groups
 
-            if gradual_approx:
-                new_module = Conv2d_gradual_int8(
+            if decoupled:
+                new_module = Conv2d_int8_decoupled.Conv2d_int8(
                     in_channels = in_channels,
                     out_channels = out_channels,
                     kernel_size = kernel_size,
@@ -54,7 +54,7 @@ def to_qat_int8(
                     groups = groups,
                     update_scale = True,
                     scale_momentum = scale_momentum
-                )
+            )
 
             else:     
                 new_module = Conv2d_int8(

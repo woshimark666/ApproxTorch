@@ -109,6 +109,10 @@ class Conv2d_int8(nn.Module):
         OW = (W + 2 * pW - dW * (kW - 1) - 1) // sW + 1
         
         # 1. do quantization first 
+        #   check if we need to update scale:
+        if self.training and self.update_scale:
+            self._update_scale(x)
+
         x = fakequant.symmetric_static_quantize_int8_per_tensor(x, self.scale_x, None, self.qmin, self.qmax)
         w, s_w = fakequant.symmetric_dynamic_quantize_int8_per_channel(self.weight, self.qmin, self.qmax)
         
@@ -132,4 +136,4 @@ class Conv2d_int8(nn.Module):
         y = y.view(B, O, OH, OW)
         y = y * self.scale_x * s_w.view(1, -1, 1, 1)
 
-        return 
+        return y
