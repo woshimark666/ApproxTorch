@@ -56,8 +56,7 @@ class Conv2d_int8(nn.Module):
             case _:
                 raise ValueError("Invalid quantization method for x")
         
-        self.register_buffer('scale_w', torch.tensor(1.0))
-        self.zero_w = None  # 占个位置 没用
+        # delete the scale_w and zero_w since we will do dynamic quantization for weight
 
         # bias
         if isinstance(bias, torch.Tensor):
@@ -114,7 +113,7 @@ class Conv2d_int8(nn.Module):
             self._update_scale(x)
 
         x = fakequant.symmetric_static_quantize_int8_per_tensor(x, self.scale_x, None, self.qmin, self.qmax)
-        w, s_w = fakequant.symmetric_dynamic_quantize_int8_per_channel(self.weight, self.qmin, self.qmax)
+        w, s_w = fakequant.symmetric_dynamic_quantize_int8_per_channel(self.weight, 0, self.qmin, self.qmax)
         
         # 2. im2col shape transform
         x = torch.nn.functional.unfold(x, self.kernel_size, dilation=self.dilation, padding=self.padding, stride=self.stride) # (N, CKK, L)
@@ -134,6 +133,6 @@ class Conv2d_int8(nn.Module):
 
         # 4. reshape and de-quantization
         y = y.view(B, O, OH, OW)
-        y = y * self.scale_x * s_w.view(1, -1, 1, 1)
+        y = y * self.scale_x.view(-1) * s_w.view(1, -1, 1, 1)
 
         return y
