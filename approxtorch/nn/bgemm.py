@@ -25,13 +25,13 @@ class _bgemm_int8_ste(_bgemm_int8_base):
 
 
 def bgemm_int8_ste(x, w, lut):
-    return _bgemm_int8_ste.apply(x, w, lut)
+    return _bgemm_int8_ste.apply(x, w, lut, None, None)
 
 
 
-class _bgemm_int8_lre(_bgemm_int8_base):
+# class _bgemm_int8_lre(_bgemm_int8_base):
 
-    @staticmethod
-    def backward(ctx, grad_outputs):
-        x, w = ctx.saved_tensors
+#     @staticmethod
+#     def backward(ctx, grad_outputs):
+#         x, w = ctx.saved_tensors
         
