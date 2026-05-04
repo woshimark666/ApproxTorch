@@ -98,3 +98,8 @@ def bgemm_gradual_int8(X: Tensor, W: Tensor, lut: Tensor, alpha: float) -> Tenso
 
 def bgemm_fake_int8_gpt(X: Tensor, W: Tensor, lut: Tensor) -> Tensor:
     return torch.ops.approxtorch.bgemm_fake_int8_forward_cuda.default(X, W, lut)
+
+
+
+def bgemm_lre_backward(grad_output: Tensor, x: Tensor, w: Tensor, dx: Tensor, dw: Tensor) -> tuple[Tensor, Tensor]:
+    return torch.ops.approxtorch.bgemm_lre_backward.default(grad_output, x, w, dx, dw)
