@@ -1,7 +1,6 @@
 
 from .Conv2d_uint8 import Conv2d_uint8
 from .Conv2d_int8 import Conv2d_int8
-from .FakeQuant import FakeQuantize_int8
 from .Conv2d_gradual_int8 import Conv2d_gradual_int8
-
+from .Conv2d_int8_decoupled import Conv2d_int8
 from .Conv2dBN import Conv2d_BN_int8
