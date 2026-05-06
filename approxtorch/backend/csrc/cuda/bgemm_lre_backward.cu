@@ -234,12 +234,14 @@ __global__ void bgemm_lre_grad_w_kernel_shared_lut(
 }
 
 
-std::vector<torch::Tensor> bgemm_lre_backward(
+std::tuple<torch::Tensor, torch::Tensor> bgemm_lre_backward(
     torch::Tensor grad_output,  // [N, O, L]
     torch::Tensor x,            // [N, K, L]
-    torch::Tensor w,            // [K, O], w 的转置
+    torch::Tensor w,            // [O, K], w 的转置
     torch::Tensor dx,           // [256]
-    torch::Tensor dw            // [256]
+    torch::Tensor dw,          // [256]
+    torch::Tensor s_x,      // [1]
+    torch::Tensor s_w       // [O]
 ) {
     CHECK_CUDA(grad_output);
     CHECK_CUDA(x);
@@ -263,7 +265,7 @@ std::vector<torch::Tensor> bgemm_lre_backward(
 
     grad_output = grad_output.contiguous();
     x = x.contiguous();
-    w = w.contiguous();
+    w = w.transpose(0, 1).contiguous();  // 转成 [K, O]，方便按照 k 做 reduction
     dx = dx.contiguous();
     dw = dw.contiguous();
 
@@ -300,7 +302,8 @@ std::vector<torch::Tensor> bgemm_lre_backward(
             (P + BP - 1) / BP,
             (K + BK - 1) / BK
         );
-
+        
+        torch::Tensor grad_output_scaled_w = grad_output_nlo * s_w.view({1, 1, O});
         bgemm_lre_grad_x_kernel_shared_lut<BP, BK, TO>
             <<<grid, block, 0, stream>>>(
                 grad_output_nlo.data_ptr<float>(),
@@ -321,7 +324,7 @@ std::vector<torch::Tensor> bgemm_lre_backward(
             (O + BO - 1) / BO,
             (K + BK - 1) / BK
         );
-
+        torch::Tensor grad_output_scaled_x = grad_output_nlo * s_x;
         bgemm_lre_grad_w_kernel_shared_lut<BO, BK, TP>
             <<<grid, block, 0, stream>>>(
                 grad_output_nlo.data_ptr<float>(),
@@ -334,7 +337,7 @@ std::vector<torch::Tensor> bgemm_lre_backward(
 
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-    return {grad_x, grad_w};
+    return std::make_tuple(grad_x, grad_w);
 }
 
 
