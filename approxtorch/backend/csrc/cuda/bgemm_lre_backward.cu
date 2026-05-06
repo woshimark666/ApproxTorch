@@ -235,13 +235,13 @@ __global__ void bgemm_lre_grad_w_kernel_shared_lut(
 
 
 std::tuple<torch::Tensor, torch::Tensor> bgemm_lre_backward(
-    torch::Tensor grad_output,  // [N, O, L]
-    torch::Tensor x,            // [N, K, L]
-    torch::Tensor w,            // [O, K], w 的转置
-    torch::Tensor dx,           // [256]
-    torch::Tensor dw,          // [256]
-    torch::Tensor s_x,      // [1]
-    torch::Tensor s_w       // [O]
+    const torch::Tensor& grad_output,  // [N, O, L]
+    const torch::Tensor& x,            // [N, K, L]
+    const torch::Tensor& w,            // [K, O], w 的转置
+    const torch::Tensor& dx,           // [256]
+    const torch::Tensor& dw,          // [256]
+    const torch::Tensor& s_x,      // [1]
+    const torch::Tensor& s_w       // [O]
 ) {
     CHECK_CUDA(grad_output);
     CHECK_CUDA(x);
@@ -265,7 +265,7 @@ std::tuple<torch::Tensor, torch::Tensor> bgemm_lre_backward(
 
     grad_output = grad_output.contiguous();
     x = x.contiguous();
-    w = w.transpose(0, 1).contiguous();  // 转成 [K, O]，方便按照 k 做 reduction
+    w = w.contiguous();  // 转成 [K, O]，方便按照 k 做 reduction
     dx = dx.contiguous();
     dw = dw.contiguous();
 
@@ -306,7 +306,7 @@ std::tuple<torch::Tensor, torch::Tensor> bgemm_lre_backward(
         torch::Tensor grad_output_scaled_w = grad_output_nlo * s_w.view({1, 1, O});
         bgemm_lre_grad_x_kernel_shared_lut<BP, BK, TO>
             <<<grid, block, 0, stream>>>(
-                grad_output_nlo.data_ptr<float>(),
+                grad_output_scaled_w.data_ptr<float>(),
                 w.data_ptr<float>(),
                 dx.data_ptr<float>(),
                 grad_x.data_ptr<float>(),
@@ -327,7 +327,7 @@ std::tuple<torch::Tensor, torch::Tensor> bgemm_lre_backward(
         torch::Tensor grad_output_scaled_x = grad_output_nlo * s_x;
         bgemm_lre_grad_w_kernel_shared_lut<BO, BK, TP>
             <<<grid, block, 0, stream>>>(
-                grad_output_nlo.data_ptr<float>(),
+                grad_output_scaled_x.data_ptr<float>(),
                 x.data_ptr<float>(),
                 dw.data_ptr<float>(),
                 grad_w.data_ptr<float>(),
@@ -343,7 +343,7 @@ std::tuple<torch::Tensor, torch::Tensor> bgemm_lre_backward(
 
 
 TORCH_LIBRARY_FRAGMENT(approxtorch, m){
-    m.def("bgemm_lre_backward(Tensor grad_output, Tensor x, Tensor w, Tensor dx, Tensor dw) -> (Tensor grad_x, Tensor grad_w)");
+    m.def("bgemm_lre_backward(Tensor grad_output, Tensor x, Tensor w, Tensor dx, Tensor dw, Tensor s_x, Tensor s_w) -> (Tensor grad_x, Tensor grad_w)");
 }
 
 TORCH_LIBRARY_IMPL(approxtorch, CUDA, m){
