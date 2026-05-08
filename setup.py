@@ -23,6 +23,7 @@ cuda_functions = CUDAExtension('approxtorch.backend._C',[
         './approxtorch/backend/csrc/cuda/bgemm_gradual_approx.cu',
         './approxtorch/backend/csrc/cuda/bgemm_float_gpt.cu',
         './approxtorch/backend/csrc/cuda/bgemm_lre_backward.cu',
+        './approxtorch/backend/csrc/cuda/bgemm_bqsg64_int_backward.cu',
     ],                   
     include_dirs = ['./approxtorch/backend/csrc/cuda'],
     extra_compile_args={'nvcc': ['-arch=native', '-std=c++17', "-O3"],

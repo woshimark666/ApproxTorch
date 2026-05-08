@@ -219,3 +219,119 @@ def DATE(multiplier, half_ws=32, save_path=None):
  
     return grad_a, grad_b
     
+
+# BQSG-64 coefficient generation from 256x256 multiplier LUT
+def generate_bqsg64_coeff_txt(
+    multiplier_txt_path: str,
+    output_txt_path: str,
+    lut_shape: tuple[int, int] = (256, 256),
+) -> np.ndarray:
+    """
+    从 256x256 approximate multiplier LUT txt 生成 BQSG-64 coefficient txt.
+
+    输入:
+        multiplier_txt_path:
+            乘法器 LUT txt 路径。
+            支持两种格式:
+                1. 256 x 256
+                2. 一维 65536 个数字
+
+            索引约定:
+                lut[qx + 128, qw + 128]
+                qx, qw ∈ [-128, 127]
+
+        output_txt_path:
+            输出 BQSG coefficient txt 路径。
+
+        lut_shape:
+            默认 (256, 256)
+
+    输出:
+        coeff:
+            shape = [16, 5]
+
+            每一行:
+                p10 p01 p20 p02 p11
+
+            对应二次曲面:
+                q_y ≈ p00
+                    + p10*q_x
+                    + p01*q_w
+                    + p20*q_x^2
+                    + p02*q_w^2
+                    + p11*q_x*q_w
+
+            backward 使用:
+                dqy/dqx = p10 + 2*p20*q_x + p11*q_w
+                dqy/dqw = p01 + 2*p02*q_w + p11*q_x
+    """
+
+    # 1. 读取 LUT
+    lut = np.loadtxt(multiplier_txt_path, dtype=np.float64)
+
+    if lut.shape == (256 * 256,):
+        lut = lut.reshape(lut_shape)
+
+    if lut.shape != lut_shape:
+        raise ValueError(
+            f"LUT shape should be {lut_shape} or one-dimensional 65536, "
+            f"but got {lut.shape}"
+        )
+
+    # 2. 准备 qx/qw 坐标
+    q_values = np.arange(-128, 128, dtype=np.float64)
+
+    qx_grid, qw_grid = np.meshgrid(
+        q_values,
+        q_values,
+        indexing="ij",
+    )
+
+    coeff = np.zeros((16, 5), dtype=np.float64)
+
+    # 3. 每个 64x64 block 拟合二次曲面
+    for bx in range(4):
+        for bw in range(4):
+            bid = (bx << 2) | bw
+
+            x_start = bx * 64
+            x_end = (bx + 1) * 64
+
+            w_start = bw * 64
+            w_end = (bw + 1) * 64
+
+            block_qx = qx_grid[x_start:x_end, w_start:w_end].reshape(-1)
+            block_qw = qw_grid[x_start:x_end, w_start:w_end].reshape(-1)
+            block_qy = lut[x_start:x_end, w_start:w_end].reshape(-1)
+
+            # 拟合完整二次曲面:
+            # q_y ≈ p00 + p10*qx + p01*qw + p20*qx^2 + p02*qw^2 + p11*qx*qw
+            A = np.stack(
+                [
+                    np.ones_like(block_qx),   # p00, 拟合时需要，但不保存
+                    block_qx,                 # p10
+                    block_qw,                 # p01
+                    block_qx * block_qx,      # p20
+                    block_qw * block_qw,      # p02
+                    block_qx * block_qw,      # p11
+                ],
+                axis=1,
+            )
+
+            p, _, _, _ = np.linalg.lstsq(A, block_qy, rcond=None)
+
+            # p = [p00, p10, p01, p20, p02, p11]
+            coeff[bid, 0] = p[1]  # p10
+            coeff[bid, 1] = p[2]  # p01
+            coeff[bid, 2] = p[3]  # p20
+            coeff[bid, 3] = p[4]  # p02
+            coeff[bid, 4] = p[5]  # p11
+
+    # 4. 保存成 16x5 txt
+    np.savetxt(
+        output_txt_path,
+        coeff,
+        fmt="%.10f",
+    )
+
+    return coeff

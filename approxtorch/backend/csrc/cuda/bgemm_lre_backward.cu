@@ -235,13 +235,13 @@ __global__ void bgemm_lre_grad_w_kernel_shared_lut(
 
 
 std::tuple<torch::Tensor, torch::Tensor> bgemm_lre_backward(
-    const torch::Tensor& grad_output,  // [N, O, L]
-    const torch::Tensor& x,            // [N, K, L]
-    const torch::Tensor& w,            // [K, O], w 的转置
-    const torch::Tensor& dx,           // [256]
-    const torch::Tensor& dw,          // [256]
-    const torch::Tensor& s_x,      // [1]
-    const torch::Tensor& s_w       // [O]
+    torch::Tensor& grad_output,  // [N, O, L]
+    torch::Tensor& x,            // [N, K, L]
+    torch::Tensor& w,            // [K, O], w 的转置
+    torch::Tensor& dx,           // [256]
+    torch::Tensor& dw,          // [256]
+    torch::Tensor& s_x,      // [1]
+    torch::Tensor& s_w       // [O]
 ) {
     CHECK_CUDA(grad_output);
     CHECK_CUDA(x);

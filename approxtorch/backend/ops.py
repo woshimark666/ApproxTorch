@@ -103,3 +103,7 @@ def bgemm_fake_int8_gpt(X: Tensor, W: Tensor, lut: Tensor) -> Tensor:
 
 def bgemm_lre_backward(grad_output: Tensor, x: Tensor, w: Tensor, dx: Tensor, dw: Tensor, s_x: Tensor, s_w: Tensor) -> tuple[Tensor, Tensor]:
     return torch.ops.approxtorch.bgemm_lre_backward.default(grad_output, x, w, dx, dw, s_x, s_w)
+
+
+def bgemm_bqsg64_backward(grad_output: Tensor, x: Tensor, w: Tensor, coeff_deriv: Tensor, s_x: Tensor, s_w: Tensor) -> tuple[Tensor, Tensor]:
+    return torch.ops.approxtorch.bgemm_bqsg64_backward.default(grad_output, x, w, coeff_deriv, s_x, s_w)
