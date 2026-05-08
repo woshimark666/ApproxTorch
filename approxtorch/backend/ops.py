@@ -51,11 +51,11 @@ def gemm_int8(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
 def gemm_uint8(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
     return torch.ops.approxtorch.gemm_uint8.default(A, B, lut)
 
-def gemm_int8_naive(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
-    return torch.ops.approxtorch.gemm_int8_naive.default(A, B, lut)
+# def gemm_int8_naive(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
+#     return torch.ops.approxtorch.gemm_int8_naive.default(A, B, lut)
 
-def gemm_uint8_naive(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
-    return torch.ops.approxtorch.gemm_uint8_naive.default(A, B, lut)
+# def gemm_uint8_naive(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
+#     return torch.ops.approxtorch.gemm_uint8_naive.default(A, B, lut)
 
 def bgemm_int8(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
     return torch.ops.approxtorch.bgemm_int8.default(A, B, lut)
@@ -64,14 +64,14 @@ def bgemm_uint8(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
     return torch.ops.approxtorch.bgemm_uint8.default(A, B, lut)
 
 
-def bgemm_custom_grad_uint8_naive(X: Tensor, W: Tensor, dY: Tensor, dx_lut: Tensor, dw_lut: Tensor) -> Tensor:
-    return torch.ops.approxtorch.bgemm_custom_grad_uint8_naive.default(X, W, dY, dx_lut, dw_lut)
+# def bgemm_custom_grad_uint8_naive(X: Tensor, W: Tensor, dY: Tensor, dx_lut: Tensor, dw_lut: Tensor) -> Tensor:
+#     return torch.ops.approxtorch.bgemm_custom_grad_uint8_naive.default(X, W, dY, dx_lut, dw_lut)
 
-def bgemm_custom_grad_int8_naive(X: Tensor, W: Tensor, dY: Tensor, dx_lut: Tensor, dw_lut: Tensor) -> Tensor:
-    return torch.ops.approxtorch.bgemm_custom_grad_int8_naive.default(X, W, dY, dx_lut, dw_lut)
+# def bgemm_custom_grad_int8_naive(X: Tensor, W: Tensor, dY: Tensor, dx_lut: Tensor, dw_lut: Tensor) -> Tensor:
+#     return torch.ops.approxtorch.bgemm_custom_grad_int8_naive.default(X, W, dY, dx_lut, dw_lut)
 
-def bgemm_custom_grad_uint8(X: Tensor, W: Tensor, dY: Tensor, dx_lut: Tensor, dw_lut: Tensor) -> Tensor:
-    return torch.ops.approxtorch.bgemm_custom_grad_uint8.default(X, W, dY, dx_lut, dw_lut)
+# def bgemm_custom_grad_uint8(X: Tensor, W: Tensor, dY: Tensor, dx_lut: Tensor, dw_lut: Tensor) -> Tensor:
+#     return torch.ops.approxtorch.bgemm_custom_grad_uint8.default(X, W, dY, dx_lut, dw_lut)
 
 
 def bgemm_custom_grad_uint8_dx(X: Tensor, W: Tensor, dY: Tensor, dx_lut: Tensor) -> Tensor:
@@ -92,8 +92,8 @@ def lut_lookup_int8(x: Tensor, lut: Tensor) -> Tensor:
     return torch.ops.approxtorch.lut_lookup_int8.default(x, lut)
 
 
-def bgemm_gradual_int8(X: Tensor, W: Tensor, lut: Tensor, alpha: float) -> Tensor:
-    return torch.ops.approxtorch.bgemm_gradual_int8.default(X, W, lut, alpha)
+# def bgemm_gradual_int8(X: Tensor, W: Tensor, lut: Tensor, alpha: float) -> Tensor:
+#     return torch.ops.approxtorch.bgemm_gradual_int8.default(X, W, lut, alpha)
 
 
 def bgemm_fake_int8_gpt(X: Tensor, W: Tensor, lut: Tensor) -> Tensor:

@@ -4,23 +4,17 @@
 //   grad_output: [N, O, L], float32 CUDA
 //   x:           [N, K, L], float32 CUDA, values are integer-like int8 in [-128, 127]
 //   w:           [O, K],    float32 CUDA, values are integer-like int8 in [-128, 127]
-//   coeff_deriv: [16, 6],   float32 CPU or CUDA
+//   coeff:       [16, 5],   float32 CPU or CUDA
 //
-// Each 64x64 block has derivative coefficients:
-//   coeff_deriv[bid] = [dx_a, dx_bx, dx_bw, dw_a, dw_bw, dw_bx]
-// where
-//   d f / d x = dx_a + dx_bx * qx + dx_bw * qw
-//   d f / d w = dw_a + dw_bw * qw + dw_bx * qx
+// Each 64x64 block stores 5 surface coefficients:
+//   coeff[bid] = [p10, p01, p20, p02, p11]
 //
-// If original surface is:
+// Original fitted surface:
 //   f(qx, qw) = p00 + p01*qw + p10*qx + p02*qw^2 + p20*qx^2 + p11*qx*qw
-// then use:
-//   dx_a  = p10
-//   dx_bx = 2*p20
-//   dx_bw = p11
-//   dw_a  = p01
-//   dw_bw = 2*p02
-//   dw_bx = p11
+//
+// Backward only needs:
+//   d f / d x = p10 + 2*p20*qx + p11*qw
+//   d f / d w = p01 + 2*p02*qw + p11*qx
 
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -29,10 +23,14 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 
-// 16 blocks * 6 derivative coefficients = 96 floats.
-__constant__ float c_bqsg_coeff[16 * 6];
+#include <tuple>
+#include <limits>
 
-constexpr int kCoeffNumel = 16 * 6;
+// 16 blocks * 5 BQSG coefficients = 80 floats.
+__constant__ float c_bqsg_coeff[16 * 5];
+
+constexpr int kCoeffPerBlock = 5;
+constexpr int kCoeffNumel = 16 * kCoeffPerBlock;
 constexpr int kWarpSize = 32;
 
 __device__ __forceinline__ int clamp_int(int v, int lo, int hi) {
@@ -51,6 +49,13 @@ __device__ __forceinline__ int q_to_block_id_1d(float q) {
     return qi >> 6;                    // 0 ~ 3
 }
 
+// If you later want continuous float block assignment instead of rounding first,
+// replace q_to_block_id_1d with this version:
+// __device__ __forceinline__ int q_to_block_id_1d(float q) {
+//     int b = __float2int_rd((q + 128.0f) * 0.015625f);  // floor((q+128)/64)
+//     return clamp_int(b, 0, 3);
+// }
+
 __device__ __forceinline__ int q_pair_to_block_id(float qx, float qw) {
     int bx = q_to_block_id_1d(qx);
     int bw = q_to_block_id_1d(qw);
@@ -59,26 +64,26 @@ __device__ __forceinline__ int q_pair_to_block_id(float qx, float qw) {
 
 __device__ __forceinline__ float bqsg_dfdx(float qx, float qw) {
     int bid = q_pair_to_block_id(qx, qw);
-    const float* c = c_bqsg_coeff + bid * 6;
+    const float* c = c_bqsg_coeff + bid * kCoeffPerBlock;
 
-    float dx_a  = c[0];
-    float dx_bx = c[1];
-    float dx_bw = c[2];
+    float p10 = c[0];
+    float p20 = c[2];
+    float p11 = c[4];
 
-    // dx_a + dx_bx * qx + dx_bw * qw
-    return fmaf(dx_bx, qx, fmaf(dx_bw, qw, dx_a));
+    // d f / d x = p10 + 2*p20*qx + p11*qw
+    return fmaf(2.0f * p20, qx, fmaf(p11, qw, p10));
 }
 
 __device__ __forceinline__ float bqsg_dfdw(float qx, float qw) {
     int bid = q_pair_to_block_id(qx, qw);
-    const float* c = c_bqsg_coeff + bid * 6;
+    const float* c = c_bqsg_coeff + bid * kCoeffPerBlock;
 
-    float dw_a  = c[3];
-    float dw_bw = c[4];
-    float dw_bx = c[5];
+    float p01 = c[1];
+    float p02 = c[3];
+    float p11 = c[4];
 
-    // dw_a + dw_bw * qw + dw_bx * qx
-    return fmaf(dw_bw, qw, fmaf(dw_bx, qx, dw_a));
+    // d f / d w = p01 + 2*p02*qw + p11*qx
+    return fmaf(2.0f * p02, qw, fmaf(p11, qx, p01));
 }
 
 __device__ __forceinline__ float warp_reduce_sum(float val) {
@@ -191,9 +196,9 @@ __global__ void bqsg64_backward_w_kernel(
 
 void check_bqsg_inputs(
     const torch::Tensor& grad_output, // [N, O, L]
-    const torch::Tensor& x,  // [N, K, L]
-    const torch::Tensor& w, // [O, K]
-    const torch::Tensor& coeff_deriv // [16 ,6]
+    const torch::Tensor& x,           // [N, K, L]
+    const torch::Tensor& w,           // [O, K]
+    const torch::Tensor& coeff        // [16, 5]
 ) {
     TORCH_CHECK(grad_output.is_cuda(), "grad_output must be a CUDA tensor");
     TORCH_CHECK(x.is_cuda(), "x must be a CUDA tensor");
@@ -202,14 +207,14 @@ void check_bqsg_inputs(
     TORCH_CHECK(grad_output.scalar_type() == torch::kFloat32, "grad_output must be float32");
     TORCH_CHECK(x.scalar_type() == torch::kFloat32, "x must be float32");
     TORCH_CHECK(w.scalar_type() == torch::kFloat32, "w must be float32");
-    TORCH_CHECK(coeff_deriv.scalar_type() == torch::kFloat32, "coeff_deriv must be float32");
+    TORCH_CHECK(coeff.scalar_type() == torch::kFloat32, "coeff must be float32");
 
     TORCH_CHECK(grad_output.dim() == 3, "grad_output must have shape [N, O, L]");
     TORCH_CHECK(x.dim() == 3, "x must have shape [N, K, L]");
     TORCH_CHECK(w.dim() == 2, "w must have shape [O, K]");
 
-    TORCH_CHECK(coeff_deriv.numel() == kCoeffNumel,
-                "coeff_deriv must have 96 elements, usually shape [16, 6]");
+    TORCH_CHECK(coeff.numel() == kCoeffNumel,
+                "coeff must have 80 elements, usually shape [16, 5], ordered as [p10, p01, p20, p02, p11]");
 
     int64_t N = grad_output.size(0);
     int64_t O = grad_output.size(1);
@@ -227,8 +232,8 @@ void check_bqsg_inputs(
     TORCH_CHECK(L <= std::numeric_limits<int>::max(), "L is too large for int indexing");
 }
 
-void copy_coeff_to_constant(const torch::Tensor& coeff_deriv) {
-    auto coeff_contig = coeff_deriv.contiguous().view({kCoeffNumel});
+void copy_coeff_to_constant(const torch::Tensor& coeff) {
+    auto coeff_contig = coeff.contiguous().view({kCoeffNumel});
 
     if (coeff_contig.is_cuda()) {
         cudaMemcpyToSymbol(
@@ -251,16 +256,15 @@ void copy_coeff_to_constant(const torch::Tensor& coeff_deriv) {
     C10_CUDA_CHECK(cudaGetLastError());
 }
 
-
 std::tuple<torch::Tensor, torch::Tensor> bgemm_bqsg64_backward_cuda(
     torch::Tensor& grad_output,  // [N, O, L]
     torch::Tensor& x,            // [N, K, L]
     torch::Tensor& w,            // [O, K]
-    torch::Tensor& coeff_deriv,  // [16, 6]
-    torch::Tensor& s_x,     // [1]
-    torch::Tensor& s_w
+    torch::Tensor& coeff,        // [16, 5], ordered as [p10, p01, p20, p02, p11]
+    torch::Tensor& s_x,          // [1] or broadcastable scalar tensor
+    torch::Tensor& s_w           // [O] or broadcastable to [1, O, 1]
 ) {
-    check_bqsg_inputs(grad_output, x, w, coeff_deriv);
+    check_bqsg_inputs(grad_output, x, w, coeff);
 
     const c10::cuda::CUDAGuard device_guard(grad_output.device());
 
@@ -273,12 +277,13 @@ std::tuple<torch::Tensor, torch::Tensor> bgemm_bqsg64_backward_cuda(
     int L = static_cast<int>(grad_output.size(2));
     int K = static_cast<int>(x.size(1));
 
-    copy_coeff_to_constant(coeff_deriv);
+    copy_coeff_to_constant(coeff);
 
     auto grad_x = torch::empty_like(x);
     auto grad_w = torch::empty_like(w);
 
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
     {
         // grad_x: one thread computes one [n,k,l].
         // 32 along L gives coalesced x/grad_x writes for neighboring l.
@@ -289,7 +294,11 @@ std::tuple<torch::Tensor, torch::Tensor> bgemm_bqsg64_backward_cuda(
             (K + block_x.y - 1) / block_x.y,
             N
         );
+
+        // grad_x should include s_w because y = s_x * s_w * q_y,
+        // and qx = x / s_x, so d y / d x = s_w * d q_y / d qx.
         auto grad_output_scaled = grad_output * s_w.view({1, O, 1});
+
         bqsg64_backward_x_kernel<<<grid_x, block_x, 0, stream>>>(
             grad_output_scaled.data_ptr<float>(),
             x.data_ptr<float>(),
@@ -302,12 +311,17 @@ std::tuple<torch::Tensor, torch::Tensor> bgemm_bqsg64_backward_cuda(
         );
         C10_CUDA_KERNEL_LAUNCH_CHECK();
     }
-    // grad_w: one block computes one [o,k], reducing over N*L.
-    {    
+
+    {
+        // grad_w: one block computes one [o,k], reducing over N*L.
         constexpr int threads_w = 256;
         dim3 block_w(threads_w, 1, 1);
         dim3 grid_w(K, O, 1);
+
+        // grad_w should include s_x because y = s_x * s_w * q_y,
+        // and qw = w / s_w, so d y / d w = s_x * d q_y / d qw.
         auto grad_output_scaled = grad_output * s_x;
+
         bqsg64_backward_w_kernel<<<grid_w, block_w, 0, stream>>>(
             grad_output_scaled.data_ptr<float>(),
             x.data_ptr<float>(),
@@ -324,26 +338,28 @@ std::tuple<torch::Tensor, torch::Tensor> bgemm_bqsg64_backward_cuda(
     return std::make_tuple(grad_x, grad_w);
 }
 
-// Optional helper: copy BQSG derivative coefficients to constant memory once.
+// Optional helper: copy BQSG coefficients to constant memory once.
 // If you call this from Python before training and then write another wrapper that does not copy
-// coeff_deriv each backward, you can remove copy overhead entirely.
-void set_bqsg_coeff_cuda(torch::Tensor coeff_deriv) {
-    TORCH_CHECK(coeff_deriv.scalar_type() == torch::kFloat32, "coeff_deriv must be float32");
-    TORCH_CHECK(coeff_deriv.numel() == kCoeffNumel,
-                "coeff_deriv must have 96 elements, usually shape [16, 6]");
+// coeff each backward, you can remove copy overhead entirely.
+void set_bqsg_coeff_cuda(torch::Tensor coeff) {
+    TORCH_CHECK(coeff.scalar_type() == torch::kFloat32, "coeff must be float32");
+    TORCH_CHECK(coeff.numel() == kCoeffNumel,
+                "coeff must have 80 elements, usually shape [16, 5], ordered as [p10, p01, p20, p02, p11]");
 
-    if (coeff_deriv.is_cuda()) {
-        const c10::cuda::CUDAGuard device_guard(coeff_deriv.device());
-        copy_coeff_to_constant(coeff_deriv);
+    if (coeff.is_cuda()) {
+        const c10::cuda::CUDAGuard device_guard(coeff.device());
+        copy_coeff_to_constant(coeff);
     } else {
-        copy_coeff_to_constant(coeff_deriv);
+        copy_coeff_to_constant(coeff);
     }
 }
 
-TORCH_LIBRARY_FRAGMENT(approxtorch, m){
-    m.def("bgemm_bqsg64_backward(Tensor grad_output, Tensor x, Tensor w, Tensor coeff_deriv, Tensor s_x, Tensor s_w) -> (Tensor grad_x, Tensor grad_w)");
+TORCH_LIBRARY_FRAGMENT(approxtorch, m) {
+    m.def("bgemm_bqsg64_backward(Tensor grad_output, Tensor x, Tensor w, Tensor coeff, Tensor s_x, Tensor s_w) -> (Tensor grad_x, Tensor grad_w)");
+    m.def("set_bqsg_coeff(Tensor coeff) -> ()");
 }
 
-TORCH_LIBRARY_IMPL(approxtorch, CUDA, m){
+TORCH_LIBRARY_IMPL(approxtorch, CUDA, m) {
     m.impl("bgemm_bqsg64_backward", &bgemm_bqsg64_backward_cuda);
+    m.impl("set_bqsg_coeff", &set_bqsg_coeff_cuda);
 }

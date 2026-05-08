@@ -14,13 +14,9 @@ cuda_functions = CUDAExtension('approxtorch.backend._C',[
         # cuda backednd
         './approxtorch/backend/csrc/cuda/im2col.cu',
         './approxtorch/backend/csrc/cuda/gemm.cu',
-        './approxtorch/backend/csrc/cuda/gemm_navie.cu',
         './approxtorch/backend/csrc/cuda/bgemm.cu',
-        './approxtorch/backend/csrc/cuda/bgemm_custom_grad_naive.cu',
-        './approxtorch/backend/csrc/cuda/bgemm_custom_grad.cu',
         './approxtorch/backend/csrc/cuda/bgemm_custom_grad_optimize.cu',
         './approxtorch/backend/csrc/cuda/lookup.cu',
-        './approxtorch/backend/csrc/cuda/bgemm_gradual_approx.cu',
         './approxtorch/backend/csrc/cuda/bgemm_float_gpt.cu',
         './approxtorch/backend/csrc/cuda/bgemm_lre_backward.cu',
         './approxtorch/backend/csrc/cuda/bgemm_bqsg64_int_backward.cu',
