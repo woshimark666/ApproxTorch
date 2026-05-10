@@ -260,9 +260,7 @@ std::tuple<torch::Tensor, torch::Tensor> bgemm_bqsg64_backward_cuda(
     torch::Tensor& grad_output,  // [N, O, L]
     torch::Tensor& x,            // [N, K, L]
     torch::Tensor& w,            // [O, K]
-    torch::Tensor& coeff,        // [16, 5], ordered as [p10, p01, p20, p02, p11]
-    torch::Tensor& s_x,          // [1] or broadcastable scalar tensor
-    torch::Tensor& s_w           // [O] or broadcastable to [1, O, 1]
+    torch::Tensor& coeff       // [16, 5], ordered as [p10, p01, p20, p02, p11]
 ) {
     check_bqsg_inputs(grad_output, x, w, coeff);
 
@@ -295,12 +293,8 @@ std::tuple<torch::Tensor, torch::Tensor> bgemm_bqsg64_backward_cuda(
             N
         );
 
-        // grad_x should include s_w because y = s_x * s_w * q_y,
-        // and qx = x / s_x, so d y / d x = s_w * d q_y / d qx.
-        auto grad_output_scaled = grad_output * s_w.view({1, O, 1});
-
         bqsg64_backward_x_kernel<<<grid_x, block_x, 0, stream>>>(
-            grad_output_scaled.data_ptr<float>(),
+            grad_output.data_ptr<float>(),
             x.data_ptr<float>(),
             w.data_ptr<float>(),
             grad_x.data_ptr<float>(),
@@ -318,12 +312,9 @@ std::tuple<torch::Tensor, torch::Tensor> bgemm_bqsg64_backward_cuda(
         dim3 block_w(threads_w, 1, 1);
         dim3 grid_w(K, O, 1);
 
-        // grad_w should include s_x because y = s_x * s_w * q_y,
-        // and qw = w / s_w, so d y / d w = s_x * d q_y / d qw.
-        auto grad_output_scaled = grad_output * s_x;
 
         bqsg64_backward_w_kernel<<<grid_w, block_w, 0, stream>>>(
-            grad_output_scaled.data_ptr<float>(),
+            grad_output.data_ptr<float>(),
             x.data_ptr<float>(),
             w.data_ptr<float>(),
             grad_w.data_ptr<float>(),
@@ -355,7 +346,7 @@ void set_bqsg_coeff_cuda(torch::Tensor coeff) {
 }
 
 TORCH_LIBRARY_FRAGMENT(approxtorch, m) {
-    m.def("bgemm_bqsg64_backward(Tensor grad_output, Tensor x, Tensor w, Tensor coeff, Tensor s_x, Tensor s_w) -> (Tensor grad_x, Tensor grad_w)");
+    m.def("bgemm_bqsg64_backward(Tensor grad_output, Tensor x, Tensor w, Tensor coeff) -> (Tensor grad_x, Tensor grad_w)");
     m.def("set_bqsg_coeff(Tensor coeff) -> ()");
 }
 

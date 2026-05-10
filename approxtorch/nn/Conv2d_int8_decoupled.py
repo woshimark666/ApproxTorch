@@ -14,8 +14,9 @@ class Conv2d_int8(nn.Module):
                  x_quantizer:str = 'symmetric',
                  w_quantizer:str = 'symmetric',
                  grad: str = 'ste',
-                 grad_dx: torch.Tensor | None = None,
-                 grad_dy: torch.Tensor | None = None,
+                 dx: torch.Tensor | None = None,
+                 dw: torch.Tensor | None = None,
+                 coefficient: torch.Tensor | None = None,
                  bias: torch.Tensor | None = None,
                  stride: int | tuple[int, int] = 1,
                  padding: int | tuple[int, int] = 0,
@@ -46,7 +47,6 @@ class Conv2d_int8(nn.Module):
         # weight
         self.weight = nn.Parameter(torch.Tensor(self.out_channels, self.in_channels, self.kernel_size[0], self.kernel_size[1]))
         # quantization parameters
-        
         match x_quantizer:
             case 'symmetric':
                 self.register_buffer('scale_x', torch.tensor(1.0))
@@ -56,7 +56,6 @@ class Conv2d_int8(nn.Module):
             case _:
                 raise ValueError("Invalid quantization method for x")
         
-        # delete the scale_w and zero_w since we will do dynamic quantization for weight
 
         # bias
         if isinstance(bias, torch.Tensor):
@@ -68,12 +67,14 @@ class Conv2d_int8(nn.Module):
         else:
             raise ValueError("Invalid bias type")
 
-        if self.grad == 'custom' or self.grad == 'lre':
-            self.register_buffer('grad_dx', grad_dx)
-            self.register_buffer('grad_dy', grad_dy)
-        else:
-            self.grad_dx = None
-            self.grad_dy = None
+        match grad:
+            case 'ste':
+                pass
+            case 'lre':
+                self.register_buffer('dx', dx)
+                self.register_buffer('dw', dw)
+            case 'bqsg64':
+                self.register_buffer('coefficient', coefficient)
 
     def __repr__(self):
         return f"Conv2d_int8_decoupled(in_channels={self.in_channels}, out_channels={self.out_channels}, kernel_size={self.kernel_size}, "\
@@ -125,14 +126,14 @@ class Conv2d_int8(nn.Module):
                 y = bgemm.bgemm_int8_ste(x, w, self.lut)
                 # y [N, O, L]]
             case 'lre':
-                raise NotImplementedError("lre gradient is not implemented yet")
-            case 'custom':
-                raise NotImplementedError("custom gradient is not implemented yet")
+                y = bgemm.bgemm_int8_lre(x, w, self.lut, self.dx, self.dw)
+            case 'bqsg64':
+                y = bgemm.bgemm_int8_bqsg64(x, w , self.lut, self.coefficient)
             case _:
                 raise ValueError("Invalid gradient method")
 
         # 4. reshape and de-quantization
         y = y.view(B, O, OH, OW)
-        y = y * self.scale_x.view(-1) * s_w.view(1, -1, 1, 1)
+        y = y * self.scale_x * s_w.view(1, -1, 1, 1)
 
         return y

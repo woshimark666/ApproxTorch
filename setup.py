@@ -39,8 +39,3 @@ setup(
     cmdclass={'build_ext': BuildExtension},
     options={'bdist_whell': {"py_limited_api": "cp39"}}
 )
-
-# setup(
-#     ext_modules=[cuda_functions],
-#     cmdclass={'build_ext': BuildExtension},
-# )
