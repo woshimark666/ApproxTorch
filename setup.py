@@ -14,14 +14,12 @@ cuda_functions = CUDAExtension('approxtorch.backend._C',[
         # cuda backednd
         './approxtorch/backend/csrc/cuda/im2col.cu',
         './approxtorch/backend/csrc/cuda/gemm.cu',
-        './approxtorch/backend/csrc/cuda/gemm_navie.cu',
         './approxtorch/backend/csrc/cuda/bgemm.cu',
-        './approxtorch/backend/csrc/cuda/bgemm_custom_grad_naive.cu',
-        './approxtorch/backend/csrc/cuda/bgemm_custom_grad.cu',
         './approxtorch/backend/csrc/cuda/bgemm_custom_grad_optimize.cu',
         './approxtorch/backend/csrc/cuda/lookup.cu',
-        './approxtorch/backend/csrc/cuda/bgemm_gradual_approx.cu',
         './approxtorch/backend/csrc/cuda/bgemm_float_gpt.cu',
+        './approxtorch/backend/csrc/cuda/bgemm_lre_backward.cu',
+        './approxtorch/backend/csrc/cuda/bgemm_bqsg64_int_backward.cu',
     ],                   
     include_dirs = ['./approxtorch/backend/csrc/cuda'],
     extra_compile_args={'nvcc': ['-arch=native', '-std=c++17', "-O3"],
@@ -41,8 +39,3 @@ setup(
     cmdclass={'build_ext': BuildExtension},
     options={'bdist_whell': {"py_limited_api": "cp39"}}
 )
-
-# setup(
-#     ext_modules=[cuda_functions],
-#     cmdclass={'build_ext': BuildExtension},
-# )

@@ -14,7 +14,7 @@ from . import nn
 from . import quant_utils
 from .convert_model import to_qat_int8, convert_model
 from . import load_lut
-from .grad_lut import lre, BQSG
+from . import grad_lut
 from . import calib
 
 from . import utils
