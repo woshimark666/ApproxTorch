@@ -1,40 +1,45 @@
-// bgemm_bqsg_backward.cu
+// bgemm_bqsg64_backward_merged.cu
 //
-// BQSG backward for BGEMM.
+// Unified BQSG backward for BGEMM.
+// This file merges the previous integer-like version and the later float pre-round version.
 //
-// grad_output: [N, O, L], float32 CUDA
-// x:           [N, K, L], float32 CUDA
-//              pre-round quantized activation values, e.g. real_x / s_x
-//              values are float, not necessarily integer.
-// w:           [O, K],    float32 CUDA
-//              pre-round quantized weight values, e.g. real_w / s_w
-//              values are float, not necessarily integer.
-// coeff:       [16, 5],   float32 CPU or CUDA
+// Inputs:
+//   grad_output: [N, O, L], float32 CUDA
+//   x:           [N, K, L], float32 CUDA
+//                Can be either integer-like int8 values in [-128, 127]
+//                or pre-round quantized float values, e.g. real_x / s_x.
+//   w:           [O, K], float32 CUDA
+//                Can be either integer-like int8 values in [-128, 127]
+//                or pre-round quantized float values, e.g. real_w / s_w.
+//   coeff:       [16, 5], float32 CPU or CUDA
 //
-// LUT is partitioned into 4 x 4 blocks.
-// Each block corresponds to a 64 x 64 region:
-//
+// LUT is partitioned into 4 x 4 blocks. Each block corresponds to a 64 x 64 region:
 //   round(q) in [-128, -65] -> block 0
 //   round(q) in [ -64,  -1] -> block 1
 //   round(q) in [   0,  63] -> block 2
 //   round(q) in [  64, 127] -> block 3
 //
 // Each block stores 5 BQSG coefficients:
-//
 //   coeff[bid] = [p10, p01, p20, p02, p11]
 //
 // Original fitted local surface:
-//
-//   z = p00 + p10*x + p01*w + p20*x^2 + p02*w^2 + p11*x*w
+//   z = p00 + p10*qx + p01*qw + p20*qx^2 + p02*qw^2 + p11*qx*qw
 //
 // Backward only needs:
-//
-//   dz/dx = p10 + 2*p20*x + p11*w
-//   dz/dw = p01 + 2*p02*w + p11*x
+//   dz/dx = p10 + 2*p20*qx + p11*qw
+//   dz/dw = p01 + 2*p02*qw + p11*qx
 //
 // Important:
-//   We use round-to-nearest(qx/qw) ONLY to select the block / coefficients.
+//   round-to-nearest(qx/qw) is used ONLY to select the 4x4 block / coefficients.
 //   The derivative formula itself uses the original float qx/qw.
+//
+// Exported ops:
+//   approxtorch::bgemm_bqsg64_backward(...)
+//   approxtorch::bgemm_bqsg64_float_backward(...)
+//   approxtorch::set_bqsg_coeff(...)
+//
+// The first two backward ops call the same implementation. This keeps compatibility
+// with both the old integer-like API name and the newer float API name.
 
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -57,20 +62,18 @@ __device__ __forceinline__ int clamp_int(int v, int lo, int hi) {
     return max(lo, min(hi, v));
 }
 
-// q is a pre-round quantized float value, for example:
-//
-//   qx = real_x / s_x
-//   qw = real_w / s_w
+// q is a float value. It can be:
+//   1. integer-like int8 value in [-128, 127], or
+//   2. pre-round quantized float value, e.g. real_x / s_x.
 //
 // For block selection:
-//
 //   1. round q to nearest integer;
 //   2. clamp the rounded integer into [-128, 127];
 //   3. shift to [0, 255];
 //   4. divide by 64 via >> 6.
 //
-// But the returned block id is used ONLY for choosing coefficients.
-// The derivative itself still uses the original float q.
+// The returned block index is used ONLY to choose BQSG coefficients.
+// The derivative formula still uses the original float q.
 __device__ __forceinline__ int q_to_block_id_1d_round_nearest(float q) {
     int qi = __float2int_rn(q);       // round-to-nearest integer
     qi = clamp_int(qi, -128, 127);    // clamp only for block selection
@@ -78,6 +81,15 @@ __device__ __forceinline__ int q_to_block_id_1d_round_nearest(float q) {
     int shifted = qi + 128;           // 0 ~ 255
     return shifted >> 6;              // 0 ~ 3
 }
+
+// Optional alternative:
+// If later you want continuous float block assignment instead of rounding first,
+// replace q_to_block_id_1d_round_nearest with this logic:
+//
+// __device__ __forceinline__ int q_to_block_id_1d_floor_continuous(float q) {
+//     int b = __float2int_rd((q + 128.0f) * 0.015625f);  // floor((q + 128) / 64)
+//     return clamp_int(b, 0, 3);
+// }
 
 __device__ __forceinline__ int q_pair_to_block_id(float qx, float qw) {
     int bx = q_to_block_id_1d_round_nearest(qx);
@@ -87,11 +99,6 @@ __device__ __forceinline__ int q_pair_to_block_id(float qx, float qw) {
     return (bx << 2) | bw;
 }
 
-// dz/dx = p10 + 2*p20*qx + p11*qw
-//
-// Note:
-//   bid is selected by round-to-nearest(qx/qw),
-//   but qx/qw in this formula are still original float values.
 __device__ __forceinline__ float bqsg_dfdx(float qx, float qw) {
     int bid = q_pair_to_block_id(qx, qw);
     const float* c = c_bqsg_coeff + bid * kCoeffPerBlock;
@@ -100,14 +107,10 @@ __device__ __forceinline__ float bqsg_dfdx(float qx, float qw) {
     float p20 = c[2];
     float p11 = c[4];
 
+    // dz/dx = p10 + 2*p20*qx + p11*qw
     return fmaf(2.0f * p20, qx, fmaf(p11, qw, p10));
 }
 
-// dz/dw = p01 + 2*p02*qw + p11*qx
-//
-// Note:
-//   bid is selected by round-to-nearest(qx/qw),
-//   but qx/qw in this formula are still original float values.
 __device__ __forceinline__ float bqsg_dfdw(float qx, float qw) {
     int bid = q_pair_to_block_id(qx, qw);
     const float* c = c_bqsg_coeff + bid * kCoeffPerBlock;
@@ -116,6 +119,7 @@ __device__ __forceinline__ float bqsg_dfdw(float qx, float qw) {
     float p02 = c[3];
     float p11 = c[4];
 
+    // dz/dw = p01 + 2*p02*qw + p11*qx
     return fmaf(2.0f * p02, qw, fmaf(p11, qx, p01));
 }
 
@@ -156,9 +160,6 @@ __device__ __forceinline__ float block_reduce_sum(float val) {
 //
 // grad_x[n,k,l]
 //   = sum_o grad_output[n,o,l] * dz/dx(x[n,k,l], w[o,k])
-//
-// x[n,k,l] and w[o,k] are float pre-round quantized values.
-// They are rounded only for choosing BQSG block coefficients.
 __global__ void bqsg64_backward_x_kernel(
     const float* __restrict__ grad_output,  // [N, O, L]
     const float* __restrict__ x,            // [N, K, L]
@@ -183,7 +184,6 @@ __global__ void bqsg64_backward_x_kernel(
     for (int o = 0; o < O; ++o) {
         float go = grad_output[(n * O + o) * L + l];
         float qw = w[o * K + k];
-
         float local_grad = bqsg_dfdx(qx, qw);
         acc = fmaf(go, local_grad, acc);
     }
@@ -195,9 +195,6 @@ __global__ void bqsg64_backward_x_kernel(
 //
 // grad_w[o,k]
 //   = sum_{n,l} grad_output[n,o,l] * dz/dw(x[n,k,l], w[o,k])
-//
-// x[n,k,l] and w[o,k] are float pre-round quantized values.
-// They are rounded only for choosing BQSG block coefficients.
 __global__ void bqsg64_backward_w_kernel(
     const float* __restrict__ grad_output,  // [N, O, L]
     const float* __restrict__ x,            // [N, K, L]
@@ -227,7 +224,6 @@ __global__ void bqsg64_backward_w_kernel(
 
         float go = grad_output[(n * O + o) * L + l];
         float qx = x[(n * K + k) * L + l];
-
         float local_grad = bqsg_dfdw(qx, qw);
         sum = fmaf(go, local_grad, sum);
     }
@@ -241,84 +237,42 @@ __global__ void bqsg64_backward_w_kernel(
 
 void check_bqsg_inputs(
     const torch::Tensor& grad_output, // [N, O, L]
-    const torch::Tensor& x,           // [N, K, L], float pre-round qx
-    const torch::Tensor& w,           // [O, K],    float pre-round qw
+    const torch::Tensor& x,           // [N, K, L]
+    const torch::Tensor& w,           // [O, K]
     const torch::Tensor& coeff        // [16, 5]
 ) {
     TORCH_CHECK(grad_output.is_cuda(), "grad_output must be a CUDA tensor");
     TORCH_CHECK(x.is_cuda(), "x must be a CUDA tensor");
     TORCH_CHECK(w.is_cuda(), "w must be a CUDA tensor");
 
-    TORCH_CHECK(
-        grad_output.scalar_type() == torch::kFloat32,
-        "grad_output must be float32"
-    );
+    TORCH_CHECK(grad_output.scalar_type() == torch::kFloat32, "grad_output must be float32");
+    TORCH_CHECK(x.scalar_type() == torch::kFloat32,
+                "x must be float32, containing integer-like int8 values or pre-round quantized values");
+    TORCH_CHECK(w.scalar_type() == torch::kFloat32,
+                "w must be float32, containing integer-like int8 values or pre-round quantized values");
+    TORCH_CHECK(coeff.scalar_type() == torch::kFloat32, "coeff must be float32");
 
-    TORCH_CHECK(
-        x.scalar_type() == torch::kFloat32,
-        "x must be float32, containing pre-round quantized values such as real_x / s_x"
-    );
+    TORCH_CHECK(grad_output.dim() == 3, "grad_output must have shape [N, O, L]");
+    TORCH_CHECK(x.dim() == 3, "x must have shape [N, K, L]");
+    TORCH_CHECK(w.dim() == 2, "w must have shape [O, K]");
 
-    TORCH_CHECK(
-        w.scalar_type() == torch::kFloat32,
-        "w must be float32, containing pre-round quantized values such as real_w / s_w"
-    );
-
-    TORCH_CHECK(
-        coeff.scalar_type() == torch::kFloat32,
-        "coeff must be float32"
-    );
-
-    TORCH_CHECK(
-        grad_output.dim() == 3,
-        "grad_output must have shape [N, O, L]"
-    );
-
-    TORCH_CHECK(
-        x.dim() == 3,
-        "x must have shape [N, K, L]"
-    );
-
-    TORCH_CHECK(
-        w.dim() == 2,
-        "w must have shape [O, K]"
-    );
-
-    TORCH_CHECK(
-        coeff.numel() == kCoeffNumel,
-        "coeff must have 80 elements, usually shape [16, 5], ordered as [p10, p01, p20, p02, p11]"
-    );
+    TORCH_CHECK(coeff.numel() == kCoeffNumel,
+                "coeff must have 80 elements, usually shape [16, 5], ordered as [p10, p01, p20, p02, p11]");
 
     int64_t N = grad_output.size(0);
     int64_t O = grad_output.size(1);
     int64_t L = grad_output.size(2);
     int64_t K = x.size(1);
 
-    TORCH_CHECK(
-        x.size(0) == N,
-        "x.size(0) must equal grad_output.size(0)"
-    );
-
-    TORCH_CHECK(
-        x.size(2) == L,
-        "x.size(2) must equal grad_output.size(2)"
-    );
-
-    TORCH_CHECK(
-        w.size(0) == O,
-        "w.size(0) must equal grad_output.size(1)"
-    );
-
-    TORCH_CHECK(
-        w.size(1) == K,
-        "w.size(1) must equal x.size(1)"
-    );
+    TORCH_CHECK(x.size(0) == N, "x.size(0) must equal grad_output.size(0)");
+    TORCH_CHECK(x.size(2) == L, "x.size(2) must equal grad_output.size(2)");
+    TORCH_CHECK(w.size(0) == O, "w.size(0) must equal grad_output.size(1)");
+    TORCH_CHECK(w.size(1) == K, "w.size(1) must equal x.size(1)");
 
     TORCH_CHECK(N <= std::numeric_limits<int>::max(), "N is too large for int indexing");
     TORCH_CHECK(O <= std::numeric_limits<int>::max(), "O is too large for int indexing");
     TORCH_CHECK(K <= std::numeric_limits<int>::max(), "K is too large for int indexing");
     TORCH_CHECK(L <= std::numeric_limits<int>::max(), "L is too large for int indexing");
-
     TORCH_CHECK(N * L <= std::numeric_limits<int>::max(),
                 "N * L is too large for int indexing in grad_w kernel");
 }
@@ -347,11 +301,11 @@ void copy_coeff_to_constant(const torch::Tensor& coeff) {
     C10_CUDA_CHECK(cudaGetLastError());
 }
 
-std::tuple<torch::Tensor, torch::Tensor> bgemm_bqsg64_float_backward_cuda(
+std::tuple<torch::Tensor, torch::Tensor> bgemm_bqsg64_backward_impl(
     torch::Tensor grad_output,  // [N, O, L]
-    torch::Tensor x,            // [N, K, L], float pre-round qx
-    torch::Tensor w,            // [O, K],    float pre-round qw
-    torch::Tensor coeff         // [16, 5], ordered as [p10, p01, p20, p02, p11]
+    torch::Tensor x,            // [N, K, L]
+    torch::Tensor w,            // [O, K]
+    torch::Tensor coeff         // [16, 5]
 ) {
     check_bqsg_inputs(grad_output, x, w, coeff);
 
@@ -373,65 +327,71 @@ std::tuple<torch::Tensor, torch::Tensor> bgemm_bqsg64_float_backward_cuda(
 
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-    {
-        // grad_x:
-        // one thread computes one [n, k, l].
-        //
-        // block_x.x = 32 along L for coalesced x/grad_x access.
-        // block_x.y = 8 along K.
-        // total threads = 32 * 8 = 256.
-        dim3 block_x(32, 8, 1);
-        dim3 grid_x(
-            (L + block_x.x - 1) / block_x.x,
-            (K + block_x.y - 1) / block_x.y,
-            N
-        );
+    // grad_x: one thread computes one [n, k, l].
+    // block_x.x = 32 along L for coalesced x/grad_x access.
+    // block_x.y = 8 along K. Total threads = 256.
+    dim3 block_x(32, 8, 1);
+    dim3 grid_x(
+        (L + block_x.x - 1) / block_x.x,
+        (K + block_x.y - 1) / block_x.y,
+        N
+    );
 
-        bqsg64_backward_x_kernel<<<grid_x, block_x, 0, stream>>>(
-            grad_output.data_ptr<float>(),
-            x.data_ptr<float>(),
-            w.data_ptr<float>(),
-            grad_x.data_ptr<float>(),
-            N,
-            O,
-            K,
-            L
-        );
+    bqsg64_backward_x_kernel<<<grid_x, block_x, 0, stream>>>(
+        grad_output.data_ptr<float>(),
+        x.data_ptr<float>(),
+        w.data_ptr<float>(),
+        grad_x.data_ptr<float>(),
+        N,
+        O,
+        K,
+        L
+    );
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-        C10_CUDA_KERNEL_LAUNCH_CHECK();
-    }
+    // grad_w: one block computes one [o, k], reducing over N * L.
+    constexpr int threads_w = 256;
+    dim3 block_w(threads_w, 1, 1);
+    dim3 grid_w(K, O, 1);
 
-    {
-        // grad_w:
-        // one block computes one [o, k], reducing over N * L.
-        constexpr int threads_w = 256;
-
-        dim3 block_w(threads_w, 1, 1);
-        dim3 grid_w(K, O, 1);
-
-        bqsg64_backward_w_kernel<<<grid_w, block_w, 0, stream>>>(
-            grad_output.data_ptr<float>(),
-            x.data_ptr<float>(),
-            w.data_ptr<float>(),
-            grad_w.data_ptr<float>(),
-            N,
-            O,
-            K,
-            L
-        );
-
-        C10_CUDA_KERNEL_LAUNCH_CHECK();
-    }
+    bqsg64_backward_w_kernel<<<grid_w, block_w, 0, stream>>>(
+        grad_output.data_ptr<float>(),
+        x.data_ptr<float>(),
+        w.data_ptr<float>(),
+        grad_w.data_ptr<float>(),
+        N,
+        O,
+        K,
+        L
+    );
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 
     return std::make_tuple(grad_x, grad_w);
 }
 
+// Optional helper: copy BQSG coefficients to constant memory once.
+// Note: the backward wrapper above still copies coeff each call for safety.
+// If you want zero copy overhead per backward, you can later add a second wrapper
+// that assumes c_bqsg_coeff has already been initialized by this function.
+void set_bqsg_coeff_cuda(torch::Tensor coeff) {
+    TORCH_CHECK(coeff.scalar_type() == torch::kFloat32, "coeff must be float32");
+    TORCH_CHECK(coeff.numel() == kCoeffNumel,
+                "coeff must have 80 elements, usually shape [16, 5], ordered as [p10, p01, p20, p02, p11]");
 
+    if (coeff.is_cuda()) {
+        const c10::cuda::CUDAGuard device_guard(coeff.device());
+        copy_coeff_to_constant(coeff);
+    } else {
+        copy_coeff_to_constant(coeff);
+    }
+}
 
 TORCH_LIBRARY_FRAGMENT(approxtorch, m) {
-    m.def("bgemm_bqsg64_float_backward(Tensor grad_output, Tensor x, Tensor w, Tensor coeff) -> (Tensor grad_x, Tensor grad_w)");
+    m.def("bgemm_bqsg64_backward(Tensor grad_output, Tensor x, Tensor w, Tensor coeff) -> (Tensor grad_x, Tensor grad_w)");
+    m.def("set_bqsg_coeff(Tensor coeff) -> ()");
 }
 
 TORCH_LIBRARY_IMPL(approxtorch, CUDA, m) {
-    m.impl("bgemm_bqsg64_float_backward", &bgemm_bqsg64_float_backward_cuda);
+    m.impl("bgemm_bqsg64_backward", &bgemm_bqsg64_backward_impl);
+    m.impl("set_bqsg_coeff", &set_bqsg_coeff_cuda);
 }

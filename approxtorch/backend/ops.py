@@ -110,5 +110,3 @@ def bgemm_bqsg64_backward(grad_output: Tensor, x: Tensor, w: Tensor, coeff_deriv
 
 
 
-def bgemm_bqsg64_float_backward(grad_output: Tensor, x: Tensor, w: Tensor, coeff_deriv: Tensor ) -> tuple[Tensor, Tensor]:
-    return torch.ops.approxtorch.bgemm_bqsg64_float_backward.default(grad_output, x, w, coeff_deriv)
