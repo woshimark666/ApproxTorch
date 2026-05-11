@@ -303,7 +303,7 @@ std::tuple<torch::Tensor, torch::Tensor> bgemm_lre_backward(
         
         bgemm_lre_grad_x_kernel_shared_lut<BP, BK, TO>
             <<<grid, block, 0, stream>>>(
-                grad_output.data_ptr<float>(),
+                grad_output_nlo.data_ptr<float>(),
                 w.data_ptr<float>(),
                 dx.data_ptr<float>(),
                 grad_x.data_ptr<float>(),
@@ -324,7 +324,7 @@ std::tuple<torch::Tensor, torch::Tensor> bgemm_lre_backward(
         
         bgemm_lre_grad_w_kernel_shared_lut<BO, BK, TP>
             <<<grid, block, 0, stream>>>(
-                grad_output.data_ptr<float>(),
+                grad_output_nlo.data_ptr<float>(),
                 x.data_ptr<float>(),
                 dw.data_ptr<float>(),
                 grad_w.data_ptr<float>(),
