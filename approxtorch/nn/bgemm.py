@@ -43,6 +43,7 @@ class _bgemm_int8_lre(_bgemm_int8_base):
                                                    w = w,
                                                    dx = dx,
                                                    dw = dw)
+        grad_w = grad_w.transpose(0, 1).contiguous()
         return grad_x, grad_w, None, None, None, None
     
 def bgemm_int8_lre(x, w, lut, dx, dw):
