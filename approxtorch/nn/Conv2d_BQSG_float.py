@@ -101,7 +101,8 @@ class _conv2d_int8_bqsg64_float(_conv2d_fakeint8_base):
         # weight [O, CKK]
         if ctx.has_bias and ctx.needs_input_grad[5]:
             grad_bias = upstream_grad.sum(dim=(0, 2, 3))
-            
+        
+        upstream_grad = upstream_grad.view(N, O, -1) # (N, O, L)
         grad_x, grad_weight = at.backend.ops.bgemm_bqsg64_float_backward(upstream_grad, x, weight, coefficient, s_x, s_w)
         # grad_x [N, CKK, L]
         # grad_weight [O, CKK]
