@@ -369,6 +369,80 @@ std::tuple<torch::Tensor, torch::Tensor> bgemm_bqsg64_backward_impl(
     return std::make_tuple(grad_x, grad_w);
 }
 
+
+std::tuple<torch::Tensor, torch::Tensor> bgemm_bqsg64_float_backward_impl(
+    torch::Tensor grad_output,  // [N, O, L]
+    torch::Tensor x,            // [N, K, L]
+    torch::Tensor w,            // [O, K]
+    torch::Tensor coeff,      // [16, 5]
+    torch::Tensor s_x,           // []
+    torch::Tensor s_w            // [O]
+) {
+    check_bqsg_inputs(grad_output, x, w, coeff);
+
+    const c10::cuda::CUDAGuard device_guard(grad_output.device());
+
+    grad_output = grad_output.contiguous();
+    x = x.contiguous();
+    w = w.contiguous();
+
+    int N = static_cast<int>(grad_output.size(0));
+    int O = static_cast<int>(grad_output.size(1));
+    int L = static_cast<int>(grad_output.size(2));
+    int K = static_cast<int>(x.size(1));
+
+    copy_coeff_to_constant(coeff);
+
+    auto grad_x = torch::empty_like(x);
+    auto grad_w = torch::empty_like(w);
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+    // grad_x: one thread computes one [n, k, l].
+    // block_x.x = 32 along L for coalesced x/grad_x access.
+    // block_x.y = 8 along K. Total threads = 256.
+    dim3 block_x(32, 8, 1);
+    dim3 grid_x(
+        (L + block_x.x - 1) / block_x.x,
+        (K + block_x.y - 1) / block_x.y,
+        N
+    );
+
+    auto grad_output_scaled = grad_output * s_w.view({1, O, 1});
+    bqsg64_backward_x_kernel<<<grid_x, block_x, 0, stream>>>(
+        grad_output_scaled.data_ptr<float>(),
+        x.data_ptr<float>(),
+        w.data_ptr<float>(),
+        grad_x.data_ptr<float>(),
+        N,
+        O,
+        K,
+        L
+    );
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+    // grad_w: one block computes one [o, k], reducing over N * L.
+    constexpr int threads_w = 256;
+    dim3 block_w(threads_w, 1, 1);
+    dim3 grid_w(K, O, 1);
+
+    grad_output_scaled = grad_output * s_x;
+    bqsg64_backward_w_kernel<<<grid_w, block_w, 0, stream>>>(
+        grad_output_scaled.data_ptr<float>(),
+        x.data_ptr<float>(),
+        w.data_ptr<float>(),
+        grad_w.data_ptr<float>(),
+        N,
+        O,
+        K,
+        L
+    );
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+    return std::make_tuple(grad_x, grad_w);
+}
+
+
 // Optional helper: copy BQSG coefficients to constant memory once.
 // Note: the backward wrapper above still copies coeff each call for safety.
 // If you want zero copy overhead per backward, you can later add a second wrapper
@@ -388,10 +462,12 @@ void set_bqsg_coeff_cuda(torch::Tensor coeff) {
 
 TORCH_LIBRARY_FRAGMENT(approxtorch, m) {
     m.def("bgemm_bqsg64_backward(Tensor grad_output, Tensor x, Tensor w, Tensor coeff) -> (Tensor grad_x, Tensor grad_w)");
+    m.def("bgemm_bqsg64_float_backward(Tensor grad_output, Tensor x, Tensor w, Tensor coeff, Tensor s_x, Tensor s_w) -> (Tensor grad_x, Tensor grad_w)");
     m.def("set_bqsg_coeff(Tensor coeff) -> ()");
 }
 
 TORCH_LIBRARY_IMPL(approxtorch, CUDA, m) {
     m.impl("bgemm_bqsg64_backward", &bgemm_bqsg64_backward_impl);
+    m.impl("bgemm_bqsg64_float_backward", &bgemm_bqsg64_float_backward_impl);
     m.impl("set_bqsg_coeff", &set_bqsg_coeff_cuda);
 }

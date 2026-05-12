@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from approxtorch.nn import Conv2d_int8, Conv2d_uint8, Conv2d_gradual_int8
 from approxtorch.nn import Conv2d_int8_decoupled
+from approxtorch.nn import Conv2d_int8_BQSG64_float
 from typing import Literal
 
 # this function convert the model into approximate model
@@ -40,29 +41,26 @@ def to_qat_int8(
             bias = module.bias
             groups = module.groups
 
-            if decoupled:
-                new_module = Conv2d_int8_decoupled.Conv2d_int8(
-                    in_channels = in_channels,
-                    out_channels = out_channels,
-                    kernel_size = kernel_size,
-                    lut = lut,
-                    x_quantizer = x_quantizer,
-                    w_quantizer = w_quantizer,
-                    grad = grad,
-                    dx = dx,
-                    dw = dw,
-                    coefficient = coefficient,
-                    bias = bias,
-                    stride = stride,
-                    padding = padding,
-                    dilation = dilation,
-                    groups = groups,
-                    update_scale = True,
-                    scale_momentum = scale_momentum
-            )
 
-            else:     
-                new_module = Conv2d_int8(
+
+            if grad == 'bqsg64_float':
+                new_module = Conv2d_int8_BQSG64_float(
+                    in_channels=in_channels,
+                    out_channels=out_channels,
+                    kernel_size=kernel_size,
+                    lut=lut,
+                    coeffcient=coefficient,
+                    bias=bias,
+                    stride=stride,
+                    padding=padding,
+                    dilation=dilation,
+                    groups=groups,
+                    update_scale=True,
+                    scale_momentum=scale_momentum
+                )
+            else:
+                if decoupled:
+                    new_module = Conv2d_int8_decoupled.Conv2d_int8(
                         in_channels = in_channels,
                         out_channels = out_channels,
                         kernel_size = kernel_size,
@@ -70,15 +68,36 @@ def to_qat_int8(
                         x_quantizer = x_quantizer,
                         w_quantizer = w_quantizer,
                         grad = grad,
-                        grad_dx = dx,
-                        grad_dy = dw,
+                        dx = dx,
+                        dw = dw,
+                        coefficient = coefficient,
                         bias = bias,
                         stride = stride,
                         padding = padding,
                         dilation = dilation,
                         groups = groups,
                         update_scale = True,
-                        scale_momentum = scale_momentum)
+                        scale_momentum = scale_momentum
+                )
+
+                else:     
+                    new_module = Conv2d_int8(
+                            in_channels = in_channels,
+                            out_channels = out_channels,
+                            kernel_size = kernel_size,
+                            lut = lut,
+                            x_quantizer = x_quantizer,
+                            w_quantizer = w_quantizer,
+                            grad = grad,
+                            grad_dx = dx,
+                            grad_dy = dw,
+                            bias = bias,
+                            stride = stride,
+                            padding = padding,
+                            dilation = dilation,
+                            groups = groups,
+                            update_scale = True,
+                            scale_momentum = scale_momentum)
             
             modules_to_replace.append((name, new_module))
 
