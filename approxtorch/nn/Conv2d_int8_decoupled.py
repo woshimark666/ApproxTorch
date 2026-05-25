@@ -9,7 +9,7 @@ class Conv2d_int8(nn.Module):
     def __init__(self,
                  in_channels: int,
                  out_channels: int,
-                 kernel_size: int | tuple[int, int], 
+                 kernel_size: int | tuple[int, int],
                  lut: torch.Tensor,
                  x_quantizer:str = 'symmetric',
                  w_quantizer:str = 'symmetric',
@@ -23,7 +23,8 @@ class Conv2d_int8(nn.Module):
                  dilation: int | tuple[int, int] = 1,
                  groups: int = 1,
                  update_scale: bool = True,
-                 scale_momentum: float = 0.05
+                 scale_momentum: float = 0.05,
+                 weight_bits: int = 8
          ):
         
         super().__init__()
@@ -39,6 +40,7 @@ class Conv2d_int8(nn.Module):
         self.grad = grad
         self.qmin = -127
         self.qmax = 127
+        self.weight_bits = weight_bits
         self.scale_momentum = scale_momentum
         self.update_scale = update_scale  # whether to update scale during training, used for BatchNorm fusion
         
@@ -114,7 +116,7 @@ class Conv2d_int8(nn.Module):
             self._update_scale(x)
 
         x = fakequant.symmetric_static_quantize_int8_per_tensor(x, self.scale_x, None, self.qmin, self.qmax)
-        w, s_w = fakequant.symmetric_dynamic_quantize_int8_per_channel(self.weight, 0, self.qmin, self.qmax)
+        w, s_w = fakequant.symmetric_dynamic_quantize_int8_per_channel(self.weight, ch_axis=0, bits=self.weight_bits)
         
         # 2. im2col shape transform
         x = torch.nn.functional.unfold(x, self.kernel_size, dilation=self.dilation, padding=self.padding, stride=self.stride) # (N, CKK, L)

@@ -19,7 +19,8 @@ def to_qat_int8(
         conv_only: bool = True,
         ignore_first_conv: bool = True,
         scale_momentum: float = 0.05,
-        decoupled: bool = False
+        decoupled: bool = False,
+        weight_bits: int = 8
         ):
     
     modules_to_replace = []
@@ -77,7 +78,8 @@ def to_qat_int8(
                         dilation = dilation,
                         groups = groups,
                         update_scale = True,
-                        scale_momentum = scale_momentum
+                        scale_momentum = scale_momentum,
+                        weight_bits = weight_bits
                 )
 
                 else:     

@@ -96,35 +96,36 @@ def symmetric_static_quantize_int8_per_tensor(x, s, z, qmin=-127, qmax=127):
     return _symmetric_static_quantize_int8_per_tensor.apply(x, s, qmin, qmax)
 
 # to dynamicly quantize weights
-def symmetric_dynamic_quantize_int8_per_channel(x, ch_axis=1, qmin=-127, qmax=127):
+def symmetric_dynamic_quantize_int8_per_channel(x, ch_axis=1, bits=8):
     """
-    Symmetric dynamic per-channel int8 quantization.
+    Symmetric dynamic per-channel signed quantization, supporting 3-bit to 8-bit.
 
-    x: input tensor or weight tensor
-       activation example: [N, C, H, W], ch_axis=1
-       weight example:     [O, I, KH, KW], ch_axis=0
-
-    s: optional scale placeholder, not used here
-    z: optional zero_point placeholder, not used for symmetric quantization
+    x:       input tensor or weight tensor
+             activation example: [N, C, H, W], ch_axis=1
+             weight example:     [O, I, KH, KW], ch_axis=0
+    ch_axis: channel dimension
+    bits:    bit-width of signed quantization (3~8), default 8
+             qmax = 2^(bits-1) - 1,  qmin = -qmax  (symmetric, no -128)
 
     return:
-        q:     quantized int8-like tensor, float dtype but integer values
+        q:     quantized tensor, float dtype but integer values
         scale: per-channel scale, shape [C]
-        z:     zero point, symmetric quantization uses 0
     """
+    assert 3 <= bits <= 8, f"bits must be between 3 and 8, got {bits}"
+
+    qmax = 2 ** (bits - 1) - 1
+    qmin = -qmax
+
     # reduce all dims except channel axis
     reduce_dims = [i for i in range(x.dim()) if i != ch_axis]
 
     # per-channel absmax
-    # example:
     # x [N, C, H, W], ch_axis=1 -> absmax shape [C]
     # w [O, I, KH, KW], ch_axis=0 -> absmax shape [O]
     absmax = x.detach().abs().amax(dim=reduce_dims)
 
-    # scale = max_abs / qmax
     scale = absmax / qmax
 
-    # call previous per-channel quantizer
     q = _symmetric_static_quantize_int8_per_channel.apply(x, scale, ch_axis, qmin, qmax)
 
     return q, scale
