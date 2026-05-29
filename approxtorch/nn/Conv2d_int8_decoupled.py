@@ -1,4 +1,5 @@
 import torch
+import torch.distributed as dist
 from . import fakequant
 import approxtorch as at
 import torch.nn as nn
@@ -92,7 +93,11 @@ class Conv2d_int8(nn.Module):
     def _update_scale(self, x):
         with torch.no_grad():
             abs_max = x.abs().max()
-            current_scale = abs_max / ((self.qmax - self.qmin) / 2 ) 
+            # 多卡 DDP 下让 scale 全局同步：先取所有 rank 的全局最大绝对值，
+            # 这样每个 rank 算出的 new_scale 完全一致，scale_x 始终保持同步。
+            if dist.is_available() and dist.is_initialized():
+                dist.all_reduce(abs_max, op=dist.ReduceOp.MAX)
+            current_scale = abs_max / ((self.qmax - self.qmin) / 2 )
             new_scale = self.scale_momentum * current_scale + (1 - self.scale_momentum) * self.scale_x
             self.scale_x.copy_(new_scale)
 
