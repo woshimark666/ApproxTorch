@@ -32,12 +32,16 @@ __global__ void bgemm_lut_fake_int8_forward_kernel(
     int L,
     int O
 ) {
-    // blockIdx.y -> M tile, M = N * L
     // blockIdx.x -> O tile
+    // blockIdx.y -> L tile (单图内的空间位置)
+    // blockIdx.z -> N   (batch)，把 M = N * L 拆成 (N, L) 两条轴，
+    //                    避免 grid.y 超过 65535 的上限
     const int tx = threadIdx.x;  // O direction
-    const int ty = threadIdx.y;  // M direction
+    const int ty = threadIdx.y;  // L direction
 
-    const int row = blockIdx.y * BM + ty;  // row in M = N * L
+    const int n   = blockIdx.z;            // batch index
+    const int l   = blockIdx.y * BM + ty;  // l within one image
+    const int row = n * L + l;             // row in M = N * L
     const int col = blockIdx.x * BN + tx;  // output channel O
 
     // shared memory 存 uint16_t 的量化值 index，即 q + 128 后的 0..255
@@ -55,17 +59,14 @@ __global__ void bgemm_lut_fake_int8_forward_kernel(
             const int r = idx / BK;
             const int kk = idx - r * BK;
 
-            const int global_row = blockIdx.y * BM + r;
+            const int l_local = blockIdx.y * BM + r;  // l within image n
             const int global_k = k0 + kk;
 
             unsigned short q = 0;
 
-            if (global_row < N * L && global_k < K) {
-                const int n = global_row / L;
-                const int l = global_row - n * L;
-
+            if (n < N && l_local < L && global_k < K) {
                 // x shape: [N, K, L]
-                float xv = __ldg(x + ((n * K + global_k) * L + l));
+                float xv = __ldg(x + ((n * K + global_k) * L + l_local));
 
                 // x 里面存的是 -128 到 127 的整数 float
                 int xi = __float2int_rn(xv) + 128;
@@ -106,7 +107,7 @@ __global__ void bgemm_lut_fake_int8_forward_kernel(
 
         __syncthreads();
 
-        if (row < N * L && col < O) {
+        if (n < N && l < L && col < O) {
 #pragma unroll
             for (int kk = 0; kk < BK; ++kk) {
                 if (k0 + kk < K) {
@@ -124,10 +125,7 @@ __global__ void bgemm_lut_fake_int8_forward_kernel(
         __syncthreads();
     }
 
-    if (row < N * L && col < O) {
-        const int n = row / L;
-        const int l = row - n * L;
-
+    if (n < N && l < L && col < O) {
         // y shape: [N, O, L]
         y[(n * O + col) * L + l] = acc;
     }
@@ -171,9 +169,16 @@ torch::Tensor bgemm_lut_forward_cuda(
     constexpr int BK = 32;
 
     dim3 block(BN, BM);
+    // 把 M = N * L 拆成 (L, N) 两条轴：
+    //   grid.x = O 方向（保持不变，w/y 的合并访存模式不受影响）
+    //   grid.y = L 方向（单图空间，远小于 65535）
+    //   grid.z = N   （batch，<= 65535）
+    // 原来把整个 N*L 放在 grid.y 上，bs 较大时会超过 grid.y 的 65535 上限，
+    // 触发 cudaErrorInvalidConfiguration（invalid configuration argument）。
     dim3 grid(
         (O + BN - 1) / BN,
-        (N * L + BM - 1) / BM
+        (L + BM - 1) / BM,
+        N
     );
 
     bgemm_lut_fake_int8_forward_kernel<BM, BN, BK>
