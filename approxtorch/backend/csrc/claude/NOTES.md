@@ -254,3 +254,24 @@ same launch count, no allocator churn).
 The cfg hook note: with the refactor, cfg=1 for N==1 keeps the
 transpose+single-gemm route via allow_direct_n1=false; auto N==1 uses
 the direct batch-1 GEMM as before.
+
+## fakequant_claude.cu — fused per-tensor fake-quant (plan C, 2026-06-10)
+
+`fakequant_per_tensor_claude(x, scale, qmin, qmax) -> (q, mask)` and
+`fakequant_per_tensor_backward_claude(go, mask, scale) -> gx`. The
+python reference (nn/fakequant.py per-tensor Function) ran 3 elementwise
+kernels forward + ~5 backward and saved the fp32 pre-round tensor just
+to recompute the STE mask. Fused: one kernel each way, saving a 1-byte
+bool mask (4x less). Bit-identical: same fp32 division, nearbyintf
+(round-half-even == torch.round), NaN-preserving comparison clamp, same
+1e-12 scale floor in fwd and bwd. Verified on half-values, clip
+boundaries, scale=0, 4-bit ranges, odd lengths: torch.equal everywhere;
+conv-level grads bit-eq. Kernel-seq speed: fwd 9.5x, bwd 11.2x.
+nn/fakequant.py dispatches to the fused op for CUDA fp32 and keeps the
+python path as CPU fallback. The per-channel (weight) quantizer is left
+unfused on purpose — weights are tiny.
+
+Cumulative held-after-forward on B32 C64 56^2 k3 (lre):
+270MB (fp32 era) -> 105 (u8 unfold) -> 55 (implicit im2col) -> 37MB
+(+ fused fakequant) = 6.65x; what remains is essentially the int8 image
+(6.4MB) + bool mask (6.4MB) + the live output y itself.

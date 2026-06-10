@@ -9,7 +9,17 @@ class _symmetric_static_quantize_int8_per_tensor(Function):
         ctx.qmin = qmin
         ctx.qmax = qmax
 
+        # CUDA: 融合算子，forward 一个 kernel 出 (q, bool mask)，
+        # 只保存 1 字节的 mask 而不是 fp32 的 x/scale（省 4 倍激活显存），
+        # 数值与下面的原始路径逐位一致
+        if x.is_cuda and x.dtype == torch.float32 and scale.is_cuda:
+            q, mask = torch.ops.approxtorch.fakequant_per_tensor_claude.default(
+                x, scale, qmin, qmax)
+            ctx.save_for_backward(mask, scale)
+            ctx.fused = True
+            return q
 
+        ctx.fused = False
         scale = torch.clamp(scale, min=1e-12)
 
         x = x / scale
@@ -22,10 +32,18 @@ class _symmetric_static_quantize_int8_per_tensor(Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        scaled_x, scale = ctx.saved_tensors
         qmin = ctx.qmin
         qmax = ctx.qmax
-    
+
+        if ctx.fused:
+            mask, scale = ctx.saved_tensors
+            # STE: gx = grad_output * mask / scale，单 kernel
+            grad_x = torch.ops.approxtorch.fakequant_per_tensor_backward_claude.default(
+                grad_output, mask, scale)
+            return grad_x, None, None, None
+
+        scaled_x, scale = ctx.saved_tensors
+
         mask = (scaled_x >= qmin) & (scaled_x <= qmax)
 
         # 因为 forward 返回的是 q = round(x / scale)
@@ -35,7 +53,7 @@ class _symmetric_static_quantize_int8_per_tensor(Function):
         # static quantization 下 scale 一般不学习，所以直接 None
         grad_scale = None
 
-        return grad_x, grad_scale, None, None, None, None
+        return grad_x, grad_scale, None, None
 
 
 
