@@ -223,3 +223,34 @@ forward, the rest is fakequant's scaled_x + misc), backward X'-map reads
 anywhere. A first attempt cast fp32->int8 in python; the cast cost
 (~0.36ms on that layer) ate the backward win — exposing the forward's
 existing u8 image is the zero-cost route.
+
+## implicit-im2col backward (plan B, 2026-06-10)
+
+`bgemm_lre_backward_claude_im2col(go, x[N,C,H,W], w, dx, dw, kh, kw, sh,
+sw, ph, pw, dilh, dilw)`: x is the PRE-unfold quantized image
+(f32/int8/uint8); `lut_map_kp_im2col_kernel` computes im2col gather
+indices on the fly while building X' [K, N*L] (out-of-bounds == unfold
+zero padding == LUT index 128). The unfolded tensor is never
+materialized in backward; the image is kH*kW smaller and L2-resident, so
+overlap reads are free. grad_x stays in im2col space [N,K,L] (autograd's
+unfold backward folds it). Conv2d_int8_decoupled passes
+`xq_pre = x.detach().to(torch.int8)` (one ~40us cast, only when grads
+are needed) + conv geometry; `bgemm_int8_lre(..., xq_pre, geom)` falls
+back to the u8-unfolded-image path when they are None.
+
+Verified bit-identical to the unfold path for f32/i8/u8 inputs across
+geometries incl. non-square kernels, stride 2, dilation 2, asymmetric
+padding, 1x1 (kernel-level), and at module level for k3s1/k3s2/1x1s1/
+1x1s2/5x5 (vs both u8-save and fp32-save: torch.equal).
+
+Memory (B32 C64 56^2 k3): held-after-forward 270 (fp32) -> 105 (u8
+unfolded) -> 55 MB (implicit), i.e. 4.9x vs original. Speed: X' build
+344.5us == kp kernel 345.5us after moving n=p/L out of the per-element
+path (grid.y spans n; GPU int division is ~20 emulated instructions and
+cost ~+95us at first). Step time equal within noise (fwd equal, bwd
++80us on a machine with +-0.1-0.3ms clock drift; GPU kernel sums equal,
+same launch count, no allocator churn).
+
+The cfg hook note: with the refactor, cfg=1 for N==1 keeps the
+transpose+single-gemm route via allow_direct_n1=false; auto N==1 uses
+the direct batch-1 GEMM as before.

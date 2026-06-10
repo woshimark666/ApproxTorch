@@ -120,6 +120,20 @@ def bgemm_lre_backward_claude(grad_output: Tensor, x: Tensor, w: Tensor, dx: Ten
     return torch.ops.approxtorch.bgemm_lre_backward_claude.default(grad_output, x, w, dx, dw)
 
 
+# implicit-im2col variant: x is the PRE-unfold quantized image [N,C,H,W]
+# (int8/uint8/float); im2col indices are computed on the fly inside the
+# X' build kernel, the unfolded tensor is never materialized
+def bgemm_lre_backward_claude_im2col(grad_output: Tensor, x: Tensor, w: Tensor,
+                                     dx: Tensor, dw: Tensor,
+                                     kernel_size, stride, padding, dilation) -> tuple[Tensor, Tensor]:
+    kh, kw = _pair(kernel_size)
+    sh, sw = _pair(stride)
+    ph, pw = _pair(padding)
+    dilh, dilw = _pair(dilation)
+    return torch.ops.approxtorch.bgemm_lre_backward_claude_im2col.default(
+        grad_output, x, w, dx, dw, kh, kw, sh, sw, ph, pw, dilh, dilw)
+
+
 # bqsg64 with int(fake) x and w  
 def bgemm_bqsg64_backward(grad_output: Tensor, x: Tensor, w: Tensor, coeff_deriv: Tensor ) -> tuple[Tensor, Tensor]:
     return torch.ops.approxtorch.bgemm_bqsg64_backward.default(grad_output, x, w, coeff_deriv)

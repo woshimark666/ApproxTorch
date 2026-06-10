@@ -33,15 +33,21 @@ def bgemm_int8_ste(x, w, lut):
 class _bgemm_int8_lre(_bgemm_int8_base):
 
     @staticmethod
-    def forward(ctx, x, w, lut, dx, dw, coeff):
-        # 主链 float 不变；backward 载荷直接保存 forward 内部现成的 uint8
-        # 量化映像（LUT 索引），不额外做任何 cast：激活保存显存降 4 倍，
-        # backward 算子直接吃 uint8（梯度与 fp32 保存逐位一致）
+    def forward(ctx, x, w, lut, dx, dw, xq_pre, geom):
+        # 主链 float 不变；backward 载荷只存量化后的小数据：
+        # - 给了 xq_pre（unfold 前的 int8 小图 [B,C,H,W]）+ geom 时，存它，
+        #   backward 用隐式 im2col 算子按需展开（展开形态永不落显存）
+        # - 否则回退为保存 forward 内部现成的 uint8 unfold 映像（仍比 fp32 省 4 倍）
+        # 两条路径的梯度与 fp32 保存逐位一致
         y, xq, wq = at.backend.ops.bgemm_fake_int8_claude_save(x, w, lut)
-        ctx.save_for_backward(xq, wq)
+        if xq_pre is not None and geom is not None:
+            ctx.save_for_backward(xq_pre, wq)
+            ctx.geom = geom
+        else:
+            ctx.save_for_backward(xq, wq)
+            ctx.geom = None
         ctx.dx = dx
         ctx.dw = dw
-        ctx.coeff = coeff
 
         return y
 
@@ -51,16 +57,21 @@ class _bgemm_int8_lre(_bgemm_int8_base):
         w = w.transpose(0, 1).contiguous()
         dx = ctx.dx
         dw = ctx.dw
-        grad_x, grad_w = at.backend.ops.bgemm_lre_backward_claude(grad_output = grad_outputs,
-                                                   x = x,
-                                                   w = w,
-                                                   dx = dx,
-                                                   dw = dw)
+        if ctx.geom is not None:
+            kernel_size, stride, padding, dilation = ctx.geom
+            grad_x, grad_w = at.backend.ops.bgemm_lre_backward_claude_im2col(
+                grad_outputs, x, w, dx, dw, kernel_size, stride, padding, dilation)
+        else:
+            grad_x, grad_w = at.backend.ops.bgemm_lre_backward_claude(grad_output = grad_outputs,
+                                                       x = x,
+                                                       w = w,
+                                                       dx = dx,
+                                                       dw = dw)
         grad_w = grad_w.transpose(0, 1).contiguous()
-        return grad_x, grad_w, None, None, None, None
-    
-def bgemm_int8_lre(x, w, lut, dx, dw):
-    return _bgemm_int8_lre.apply(x, w, lut, dx, dw, None)
+        return grad_x, grad_w, None, None, None, None, None
+
+def bgemm_int8_lre(x, w, lut, dx, dw, xq_pre=None, geom=None):
+    return _bgemm_int8_lre.apply(x, w, lut, dx, dw, xq_pre, geom)
 
 
 class _bgemm_int8_bqsg64(_bgemm_int8_base):

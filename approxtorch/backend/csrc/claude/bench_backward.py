@@ -142,7 +142,40 @@ def check_correctness(opt_op, ref_op, cfg_op):
             if not (torch.equal(gx_f, gx_u) and torch.equal(gw_f, gw_u)):
                 print(f"  FAIL uint8 path N{N} K{K} L{L} O{O} noisy={noisy}")
                 ok = False
-    print("  int8 input path:", "pass (bit-identical to float path)" if ok else "FAIL")
+    print("  int8/uint8 input path:", "pass (bit-identical to float path)" if ok else "FAIL")
+
+    # implicit-im2col op (pre-unfold image input) vs unfold + regular op:
+    # expect bit-identical for all dtypes and conv geometries
+    import torch.nn.functional as F
+    im2col_op = torch.ops.approxtorch.bgemm_lre_backward_claude_im2col
+    geoms = [
+        # (B, C, H, W, O, kernel, stride, padding, dilation)
+        (2, 3, 17, 19, 8, (3, 3), (1, 1), (1, 1), (1, 1)),
+        (3, 8, 14, 14, 16, (3, 3), (2, 2), (1, 1), (1, 1)),
+        (2, 4, 21, 20, 6, (5, 3), (2, 1), (2, 0), (2, 1)),
+        (1, 16, 9, 9, 32, (1, 1), (2, 2), (0, 0), (1, 1)),
+        (2, 8, 7, 7, 5, (7, 7), (1, 1), (3, 3), (1, 1)),
+    ]
+    for (B, C, H, W, O, k, s, p, d) in geoms:
+        g = torch.Generator(device="cpu").manual_seed(B * 100 + C)
+        ximg = torch.randint(-127, 128, (B, C, H, W), generator=g).float().cuda()
+        xunf = F.unfold(ximg, k, dilation=d, padding=p, stride=s)  # [B, K, L]
+        K2 = xunf.shape[1]
+        w2 = torch.randint(-127, 128, (K2, O), generator=g).float().cuda()
+        go2 = torch.randn((B, O, xunf.shape[2]), generator=g).cuda()
+        dxl = torch.randn(256, generator=g).cuda()
+        dwl = torch.randn(256, generator=g).cuda()
+        gx_u, gw_u = opt_op(go2, xunf, w2, dxl, dwl)
+        for tag, cast in [("f32", lambda t: t),
+                          ("i8", lambda t: t.to(torch.int8)),
+                          ("u8", lambda t: (t + 128).to(torch.uint8))]:
+            gx_i, gw_i = im2col_op(go2, cast(ximg), w2, dxl, dwl,
+                                   k[0], k[1], s[0], s[1], p[0], p[1], d[0], d[1])
+            if not (torch.equal(gx_u, gx_i) and torch.equal(gw_u, gw_i)):
+                print(f"  FAIL im2col[{tag}] B{B} C{C} {H}x{W} k{k} s{s} p{p} d{d} "
+                      f"maxdiff gw={(gw_u-gw_i).abs().max():.2e}")
+                ok = False
+    print("  implicit-im2col op:", "pass (bit-identical to unfold path)" if ok else "FAIL")
 
     # bench shapes: grad_x vs reference (fp32-level agreement); grad_w vs an
     # fp64 ground truth for BOTH kernels (accumulation order differs, so the

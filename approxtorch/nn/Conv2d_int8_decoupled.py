@@ -141,7 +141,14 @@ class Conv2d_int8(nn.Module):
 
         x = fakequant.symmetric_static_quantize_int8_per_tensor(x, self.scale_x, None, self.qmin, self.qmax)
         w, s_w = fakequant.symmetric_dynamic_quantize_int8_per_channel(self.weight, ch_axis=0, bits=self.weight_bits)
-        
+
+        # lre backward 用隐式 im2col：保存 unfold 前的 int8 小图（值已是精确
+        # 整数，cast 无损），展开形态不再保存，比存 unfold 后省 kH*kW 倍
+        xq_pre = None
+        if self.grad == 'lre' and torch.is_grad_enabled() \
+                and (x.requires_grad or self.weight.requires_grad):
+            xq_pre = x.detach().to(torch.int8)
+
         # 2. im2col shape transform
         # 1x1 卷积（无 padding）时 unfold 只是一次 gather 复制：
         # stride=1 直接 view，stride>1 切片再展平，省掉 unfold 的全量复制
@@ -159,7 +166,10 @@ class Conv2d_int8(nn.Module):
                 y = bgemm.bgemm_int8_ste(x, w, self.lut)
                 # y [N, O, L]]
             case 'lre':
-                y = bgemm.bgemm_int8_lre(x, w, self.lut, self.dx, self.dw)
+                geom = None
+                if xq_pre is not None:
+                    geom = (self.kernel_size, self.stride, self.padding, self.dilation)
+                y = bgemm.bgemm_int8_lre(x, w, self.lut, self.dx, self.dw, xq_pre, geom)
             case 'bqsg64':
                 y = bgemm.bgemm_int8_bqsg64(x, w , self.lut, self.coefficient)
             case _:
