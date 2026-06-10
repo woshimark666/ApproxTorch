@@ -120,3 +120,88 @@ where the relative speedup is ~3x:
 Ideas not (yet) pursued: cp.async double buffering (gathers dominate,
 tile loads are <5% of traffic); fp16 LUT (not exact); sorting/binning by
 row value (restructuring cost outweighs).
+
+---
+
+# claude/bgemm_lre_backward_claude.cu — LRE backward
+
+Target: `bgemm_lre_backward` in `../cuda/bgemm_lre_backward.cu`.
+New ops (same schema + a tuning hook):
+
+- `approxtorch::bgemm_lre_backward_claude(go, x, w, dx, dw) -> (gx, gw)`
+- `approxtorch::bgemm_lre_backward_claude_cfg(..., cfg)`
+  (cfg -1 auto, 1 = single-gemm grad_w, 2 = batched grad_w)
+
+Run `python bench_backward.py [--sweep] [--quick]` here.
+
+## Why this one is NOT a custom-kernel problem
+
+Unlike the forward (irreducible 2-D `lut[(xi,wi)]` gather), the backward
+factorizes: `DX[q(w[k,o])]` doesn't depend on x, so
+
+    W' = DX∘q(w)  ([K,O], K*O cheap lookups)   gx[n] = W' @ go[n]
+    X' = DW∘q(x)  ([N,K,L], one pass over x)   gw    = Σ_n X'[n] @ go[n]^T
+
+i.e. tiny elementwise LUT prepasses + pure fp32 GEMMs -> cuBLAS. The
+reference is a hand-rolled 16x16 one-output-per-thread smem GEMM (~1-2
+TFLOPs) and additionally pays a full `go.permute(0,2,1).contiguous()`.
+
+## Structure
+
+- `lut_map_flat_kernel`: out[i] = slut[q(in[i])], smem LUT, float4 loop.
+  Used for W' (always) and X' natural layout (N==1 path).
+- `lut_map_kp_kernel`: X' written directly in [K, N*L] layout (read and
+  write both l-coalesced; one 32-bit div per element).
+- `transpose_ol_batched_kernel`: classic 32x32 smem-tiled batched
+  transpose go [N,O,L] -> [N,L,O]; skipped when L==1 or O==1 (layouts
+  coincide).
+- grad_x: one `cublasSgemmStridedBatched`, strideB=0 broadcasts W',
+  consumes go in its natural [N,O,L] layout (no permute at all).
+  L==1 collapses to a single Sgemm ([N,O]@W'^T, avoids N gemv batches).
+- grad_w: single Sgemm `X'[K,P] @ go_nlo[P,O]` (P=N*L). N==1 instead
+  uses one batched call straight into grad_w (no transpose/workspace).
+- TF32 only if `torch.backends.cuda.matmul.allow_tf32` (default off);
+  handle math mode saved/restored around the calls.
+
+## Heuristic (measured, not the traffic model)
+
+Predicted batched+sum (workspace [N,K,O] + sum over N) would win for
+K << L; sweep says otherwise — the single big GEMM won every N>1 shape
+(one large GEMM amortizes better than N small ones + reduce pass), e.g.
+(128,27,1024,16): single 0.068ms vs batched 0.121ms. So auto = single
+unless N==1. The batched path is kept behind cfg=2.
+
+## Numerics
+
+LUT indexing identical (`__float2int_rn` + clamp). cuBLAS reduction
+order differs from the reference's sequential loop, so not bit-exact —
+but consistently *closer* to the fp64 ground truth (gw relerr ~3-7e-7
+vs reference ~1-11e-6 across bench shapes). gx came out bit-identical
+to the reference on nearly all shapes anyway.
+
+## Measured (bench_backward.py, end-to-end op, ms)
+
+| shape (N,K,L,O) | ref ms | claude ms | speedup |
+|---|---|---|---|
+| 128,27,1024,16 | 5.33 | 0.071 | 74.5x |
+| 128,144,1024,16 | 6.58 | 0.368 | 17.9x |
+| 128,288,256,32 | 1.41 | 0.113 | 12.5x |
+| 128,576,64,64 | 0.55 | 0.088 | 6.3x |
+| 32,147,12544,64 | 20.95 | 1.901 | 11.0x |
+| 32,576,3136,64 | 6.83 | 1.320 | 5.2x |
+| 32,1152,784,128 | 4.13 | 0.817 | 5.1x |
+| 32,2304,196,256 | 3.51 | 0.634 | 5.5x |
+| 32,4608,49,512 | 3.26 | 0.703 | 4.6x |
+| 1,4608,49,512 | 0.26 | 0.053 | 5.0x |
+| 1,576,3136,64 | 0.27 | 0.037 | 7.3x |
+| 8,1024,1024,1024 | 7.95 | 1.194 | 6.7x |
+| 64,512,1,1000 | 0.10 | 0.026 | 3.7x |
+
+Sanity: (32,576,3136,64) cfg1 traffic estimate (X' build 462MB r+w,
+transpose 51MB, gemm reads ~257MB, gx write 231MB) ≈ 1.2ms @ ~800GB/s —
+measured 1.32ms, i.e. near memory-bound optimal; little headroom left
+short of fusing the lookup into a custom GEMM.
+
+Ideas not pursued: two streams to overlap the gx GEMM with the gw chain
+(both near memory-bound, little to gain); custom fused lookup+GEMM
+(loses to cuBLAS); TF32 by default (changes numerics).
