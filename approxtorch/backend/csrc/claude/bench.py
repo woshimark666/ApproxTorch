@@ -108,6 +108,18 @@ def check_correctness(opt_op, ref_op):
             print(f"  FAIL float-LUT fallback N{N} K{K} L{L} O{O} "
                   f"maxdiff={(yt-yo).abs().max().item()}")
             ok = False
+    # contiguous views with nonzero storage_offset (misaligned data_ptr) must
+    # take the scalar quantize path and match the float4 path bit-for-bit
+    def off(t):
+        base = torch.empty(t.numel() + 1, dtype=t.dtype, device=t.device)
+        base[1:] = t.reshape(-1)
+        return base[1:].view(t.shape)
+
+    x, w, lut = make_inputs(3, 33, 40, 17, seed=5)
+    if not torch.equal(opt_op(x, w, lut), opt_op(off(x), off(w), off(lut))):
+        print("  FAIL offset-view inputs")
+        ok = False
+    print("  offset-view inputs:", "pass" if ok else "FAIL")
     # vs reference kernel on all bench shapes (expect bit-identical)
     for (N, K, L, O) in SHAPES:
         x, w, lut = make_inputs(N, K, L, O, seed=K + O)

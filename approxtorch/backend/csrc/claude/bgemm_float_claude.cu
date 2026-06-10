@@ -62,6 +62,14 @@ enum Mode { XMK = 0, NFLAT = 1, SFLAT = 2 };
 
 static inline int ceil_div(int a, int b) { return (a + b - 1) / b; }
 
+// float4/uchar4 global accesses require 16/4-byte aligned addresses, but
+// contiguous() can return a view with nonzero storage_offset whose data_ptr
+// is only element-aligned. Vectorize only when every pointer qualifies
+// (fresh allocations from the caching allocator always do).
+static inline bool ptr_aligned(const void* p, uintptr_t bytes) {
+    return (reinterpret_cast<uintptr_t>(p) & (bytes - 1)) == 0;
+}
+
 // ---------------------------------------------------------------------------
 // Prepass: quantize float (integers in [-128,127] stored as float) -> uint8
 // index (value + 128, clamped to [0,255]), vectorized float4 -> uchar4.
@@ -74,6 +82,7 @@ __device__ __forceinline__ uint8_t quantize_one(float v)
     return static_cast<uint8_t>(q);
 }
 
+template<int VEC>
 __global__ void quantize_to_u8_kernel(
     const float* __restrict__ in,
     uint8_t* __restrict__ out,
@@ -81,19 +90,21 @@ __global__ void quantize_to_u8_kernel(
 {
     const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
     const long long tid0   = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
-    const long long n4     = numel >> 2;
+    const long long n4     = (VEC == 4) ? (numel >> 2) : 0;
 
-    const float4* in4 = reinterpret_cast<const float4*>(in);
-    uchar4* out4      = reinterpret_cast<uchar4*>(out);
+    if constexpr (VEC == 4) {
+        const float4* in4 = reinterpret_cast<const float4*>(in);
+        uchar4* out4      = reinterpret_cast<uchar4*>(out);
 
-    for (long long i = tid0; i < n4; i += stride) {
-        float4 v = in4[i];
-        uchar4 q;
-        q.x = quantize_one(v.x);
-        q.y = quantize_one(v.y);
-        q.z = quantize_one(v.z);
-        q.w = quantize_one(v.w);
-        out4[i] = q;
+        for (long long i = tid0; i < n4; i += stride) {
+            float4 v = in4[i];
+            uchar4 q;
+            q.x = quantize_one(v.x);
+            q.y = quantize_one(v.y);
+            q.z = quantize_one(v.z);
+            q.w = quantize_one(v.w);
+            out4[i] = q;
+        }
     }
     for (long long i = (n4 << 2) + tid0; i < numel; i += stride) {
         out[i] = quantize_one(in[i]);
@@ -536,12 +547,15 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bgemm_lut_forward_cuda_c
         const long long xn = static_cast<long long>(N) * K * L;
         const long long wn = static_cast<long long>(O) * K;
         const int threads = 256;
-        const int xblocks = static_cast<int>(std::min<long long>(xn / 4 / threads + 1, 4096));
-        const int wblocks = static_cast<int>(std::min<long long>(wn / 4 / threads + 1, 4096));
-        quantize_to_u8_kernel<<<xblocks, threads, 0, stream>>>(
-            xc.data_ptr<float>(), xq.data_ptr<uint8_t>(), xn);
-        quantize_to_u8_kernel<<<wblocks, threads, 0, stream>>>(
-            wc.data_ptr<float>(), wq.data_ptr<uint8_t>(), wn);
+        auto launch_quant = [&](const float* in, uint8_t* out, long long n) {
+            const bool vec = ptr_aligned(in, 16) && ptr_aligned(out, 4);
+            const int blocks = static_cast<int>(
+                std::min<long long>(n / (vec ? 4 : 1) / threads + 1, 4096));
+            if (vec) quantize_to_u8_kernel<4><<<blocks, threads, 0, stream>>>(in, out, n);
+            else     quantize_to_u8_kernel<1><<<blocks, threads, 0, stream>>>(in, out, n);
+        };
+        launch_quant(xc.data_ptr<float>(), xq.data_ptr<uint8_t>(), xn);
+        launch_quant(wc.data_ptr<float>(), wq.data_ptr<uint8_t>(), wn);
     }
 
     auto y = torch::empty({N, O, L}, xc.options());

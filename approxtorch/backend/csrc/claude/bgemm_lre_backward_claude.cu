@@ -82,8 +82,17 @@ template <> struct Vec4<float>   { using type = float4; };
 template <> struct Vec4<int8_t>  { using type = char4;  };
 template <> struct Vec4<uint8_t> { using type = uchar4; };
 
-// out[i] = lut[q(in[i])], flat layout. 4-wide main loop + scalar tail.
-template <typename T>
+// Vec4 global accesses require 4*sizeof(T)-byte aligned addresses, but
+// contiguous() can return a view with nonzero storage_offset whose data_ptr
+// is only element-aligned. Vectorize only when every pointer qualifies
+// (fresh allocations from the caching allocator always do).
+inline bool ptr_aligned(const void* p, uintptr_t bytes) {
+    return (reinterpret_cast<uintptr_t>(p) & (bytes - 1)) == 0;
+}
+
+// out[i] = lut[q(in[i])], flat layout. 4-wide main loop + scalar tail
+// (VEC == 1: scalar loop only, for misaligned pointers).
+template <typename T, int VEC>
 __global__ void lut_map_flat_kernel(
     const T* __restrict__ in,
     const float* __restrict__ lut,
@@ -97,18 +106,20 @@ __global__ void lut_map_flat_kernel(
     const long long stride = (long long)gridDim.x * blockDim.x;
     const long long base = (long long)blockIdx.x * blockDim.x + threadIdx.x;
 
-    const long long n4 = numel >> 2;
-    using V4 = typename Vec4<T>::type;
-    const V4* in4 = reinterpret_cast<const V4*>(in);
-    float4* out4 = reinterpret_cast<float4*>(out);
-    for (long long i = base; i < n4; i += stride) {
-        V4 v = in4[i];
-        float4 r;
-        r.x = slut[lut_idx_of(v.x)];
-        r.y = slut[lut_idx_of(v.y)];
-        r.z = slut[lut_idx_of(v.z)];
-        r.w = slut[lut_idx_of(v.w)];
-        out4[i] = r;
+    const long long n4 = (VEC == 4) ? (numel >> 2) : 0;
+    if constexpr (VEC == 4) {
+        using V4 = typename Vec4<T>::type;
+        const V4* in4 = reinterpret_cast<const V4*>(in);
+        float4* out4 = reinterpret_cast<float4*>(out);
+        for (long long i = base; i < n4; i += stride) {
+            V4 v = in4[i];
+            float4 r;
+            r.x = slut[lut_idx_of(v.x)];
+            r.y = slut[lut_idx_of(v.y)];
+            r.z = slut[lut_idx_of(v.z)];
+            r.w = slut[lut_idx_of(v.w)];
+            out4[i] = r;
+        }
     }
     for (long long i = (n4 << 2) + base; i < numel; i += stride) {
         out[i] = slut[lut_idx_of(in[i])];
@@ -243,18 +254,29 @@ bool qdtype_ok(torch::ScalarType t) {
 
 // ---- dtype-dispatched kernel launchers ----
 
+template <typename T>
+void launch_lut_map_flat_typed(cudaStream_t stream, const T* in,
+                               const float* lut, float* out, long long n) {
+    const bool vec = ptr_aligned(in, 4 * sizeof(T)) && ptr_aligned(out, 16);
+    const int grid = map_grid(n, MAP_THREADS * (vec ? 4 : 1));
+    if (vec) {
+        lut_map_flat_kernel<T, 4><<<grid, MAP_THREADS, 0, stream>>>(in, lut, out, n);
+    } else {
+        lut_map_flat_kernel<T, 1><<<grid, MAP_THREADS, 0, stream>>>(in, lut, out, n);
+    }
+}
+
 void launch_lut_map_flat(cudaStream_t stream, const torch::Tensor& in,
                          const torch::Tensor& lut, torch::Tensor& out) {
     const long long n = in.numel();
-    const int grid = map_grid(n, MAP_THREADS * 4);
     if (in.scalar_type() == torch::kChar) {
-        lut_map_flat_kernel<int8_t><<<grid, MAP_THREADS, 0, stream>>>(
+        launch_lut_map_flat_typed(stream,
             in.data_ptr<int8_t>(), lut.data_ptr<float>(), out.data_ptr<float>(), n);
     } else if (in.scalar_type() == torch::kByte) {
-        lut_map_flat_kernel<uint8_t><<<grid, MAP_THREADS, 0, stream>>>(
+        launch_lut_map_flat_typed(stream,
             in.data_ptr<uint8_t>(), lut.data_ptr<float>(), out.data_ptr<float>(), n);
     } else {
-        lut_map_flat_kernel<float><<<grid, MAP_THREADS, 0, stream>>>(
+        launch_lut_map_flat_typed(stream,
             in.data_ptr<float>(), lut.data_ptr<float>(), out.data_ptr<float>(), n);
     }
     C10_CUDA_KERNEL_LAUNCH_CHECK();

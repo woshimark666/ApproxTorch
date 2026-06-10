@@ -144,6 +144,28 @@ def check_correctness(opt_op, ref_op, cfg_op):
                 ok = False
     print("  int8/uint8 input path:", "pass (bit-identical to float path)" if ok else "FAIL")
 
+    # contiguous views with nonzero storage_offset (misaligned data_ptr) must
+    # take the scalar lut-map path and match the vectorized path bit-for-bit
+    def off(t):
+        base = torch.empty(t.numel() + 1, dtype=t.dtype, device=t.device)
+        base[1:] = t.reshape(-1)
+        return base[1:].view(t.shape)
+
+    go, x, w, dx, dw = make_inputs(2, 100, 31, 96, seed=42, noisy=True)
+    gx_a, gw_a = opt_op(go, x, w, dx, dw)
+    gx_v, gw_v = opt_op(off(go), off(x), off(w), off(dx), off(dw))
+    if not (torch.equal(gx_a, gx_v) and torch.equal(gw_a, gw_v)):
+        print("  FAIL offset-view inputs (float)")
+        ok = False
+    xu = (x.round().clamp(-128, 127) + 128).to(torch.uint8)
+    w8 = w.round().clamp(-128, 127).to(torch.int8)
+    gx_a, gw_a = opt_op(go, xu, w8, dx, dw)
+    gx_v, gw_v = opt_op(go, off(xu), off(w8), dx, dw)
+    if not (torch.equal(gx_a, gx_v) and torch.equal(gw_a, gw_v)):
+        print("  FAIL offset-view inputs (u8/i8)")
+        ok = False
+    print("  offset-view inputs:", "pass" if ok else "FAIL")
+
     # implicit-im2col op (pre-unfold image input) vs unfold + regular op:
     # expect bit-identical for all dtypes and conv geometries
     import torch.nn.functional as F
