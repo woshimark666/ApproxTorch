@@ -18,6 +18,8 @@ cuda_functions = CUDAExtension('approxtorch.backend._C',[
         './approxtorch/backend/csrc/cuda/bgemm_custom_grad_optimize.cu',
         './approxtorch/backend/csrc/cuda/lookup.cu',
         './approxtorch/backend/csrc/cuda/bgemm_float_gpt.cu',
+        # claude-optimized bgemm (op: bgemm_fake_int8_forward_cuda_claude)
+        './approxtorch/backend/csrc/claude/bgemm_float_claude.cu',
         './approxtorch/backend/csrc/cuda/bgemm_lre_backward.cu',
         './approxtorch/backend/csrc/cuda/bgemm_bqsg64_backward.cu',
         './approxtorch/backend/csrc/cuda/elementwise_mul.cu',
