@@ -34,6 +34,11 @@
 // ascending-k loop, so results match to fp32 round-off (allclose), not
 // bit-exactly. TF32 is only used if torch.backends.cuda.matmul.allow_tf32
 // is enabled (default off => full fp32).
+//
+// x and w are accepted as float32 OR int8: fake-quantized values are exact
+// integers, so the autograd Function saves them as int8 (4x less activation
+// memory) and this op consumes them directly (LUT index = v+128, no
+// rounding). Gradients are float32 either way, identical bit-for-bit.
 
 #include <torch/extension.h>
 #include <cuda.h>
@@ -53,9 +58,22 @@ __device__ __forceinline__ int qfloat_to_idx(float v) {
     return max(QMIN, min(QMAX, q)) + 128;
 }
 
-// out[i] = lut[q(in[i])], flat layout. float4 main loop + scalar tail.
+// int8 inputs hold already-quantized values: index is just v+128, no
+// rounding/clamping needed (the dtype guarantees [-128, 127]). uint8 inputs
+// are the forward op's quantized LUT-index images: index is the value itself.
+__device__ __forceinline__ int lut_idx_of(float v)   { return qfloat_to_idx(v); }
+__device__ __forceinline__ int lut_idx_of(int8_t v)  { return (int)v + 128; }
+__device__ __forceinline__ int lut_idx_of(uint8_t v) { return (int)v; }
+
+template <typename T> struct Vec4;
+template <> struct Vec4<float>   { using type = float4; };
+template <> struct Vec4<int8_t>  { using type = char4;  };
+template <> struct Vec4<uint8_t> { using type = uchar4; };
+
+// out[i] = lut[q(in[i])], flat layout. 4-wide main loop + scalar tail.
+template <typename T>
 __global__ void lut_map_flat_kernel(
-    const float* __restrict__ in,
+    const T* __restrict__ in,
     const float* __restrict__ lut,
     float* __restrict__ out,
     long long numel
@@ -68,27 +86,29 @@ __global__ void lut_map_flat_kernel(
     const long long base = (long long)blockIdx.x * blockDim.x + threadIdx.x;
 
     const long long n4 = numel >> 2;
-    const float4* in4 = reinterpret_cast<const float4*>(in);
+    using V4 = typename Vec4<T>::type;
+    const V4* in4 = reinterpret_cast<const V4*>(in);
     float4* out4 = reinterpret_cast<float4*>(out);
     for (long long i = base; i < n4; i += stride) {
-        float4 v = in4[i];
+        V4 v = in4[i];
         float4 r;
-        r.x = slut[qfloat_to_idx(v.x)];
-        r.y = slut[qfloat_to_idx(v.y)];
-        r.z = slut[qfloat_to_idx(v.z)];
-        r.w = slut[qfloat_to_idx(v.w)];
+        r.x = slut[lut_idx_of(v.x)];
+        r.y = slut[lut_idx_of(v.y)];
+        r.z = slut[lut_idx_of(v.z)];
+        r.w = slut[lut_idx_of(v.w)];
         out4[i] = r;
     }
     for (long long i = (n4 << 2) + base; i < numel; i += stride) {
-        out[i] = slut[qfloat_to_idx(in[i])];
+        out[i] = slut[lut_idx_of(in[i])];
     }
 }
 
 // xp[k, n*L + l] = lut[q(x[n, k, l])]  ([N,K,L] -> [K, N*L])
 // Writes are fully coalesced (consecutive threads span p = n*L+l); reads are
 // coalesced within each L-segment.
+template <typename T>
 __global__ void lut_map_kp_kernel(
-    const float* __restrict__ x,
+    const T* __restrict__ x,
     const float* __restrict__ lut,
     float* __restrict__ xp,
     int N, int K, int L
@@ -100,13 +120,13 @@ __global__ void lut_map_kp_kernel(
     const int P = N * L;
     const int pstride = gridDim.x * blockDim.x;
     for (int k = blockIdx.z; k < K; k += gridDim.z) {
-        const float* xk = x + (long long)k * L;          // + n*K*L below
+        const T* xk = x + (long long)k * L;              // + n*K*L below
         float* xpk = xp + (long long)k * P;
         for (int p = blockIdx.x * blockDim.x + threadIdx.x; p < P; p += pstride) {
             int n = p / L;
             int l = p - n * L;
-            float v = xk[(long long)n * K * L + l];
-            xpk[p] = slut[qfloat_to_idx(v)];
+            T v = xk[(long long)n * K * L + l];
+            xpk[p] = slut[lut_idx_of(v)];
         }
     }
 }
@@ -166,10 +186,17 @@ std::tuple<torch::Tensor, torch::Tensor> bgemm_lre_backward_claude_impl(
     TORCH_CHECK(grad_output_in.is_cuda() && x_in.is_cuda() && w_in.is_cuda()
                 && dx_in.is_cuda() && dw_in.is_cuda(), "all tensors must be CUDA");
     TORCH_CHECK(grad_output_in.scalar_type() == torch::kFloat32
-                && x_in.scalar_type() == torch::kFloat32
-                && w_in.scalar_type() == torch::kFloat32
                 && dx_in.scalar_type() == torch::kFloat32
-                && dw_in.scalar_type() == torch::kFloat32, "all tensors must be float32");
+                && dw_in.scalar_type() == torch::kFloat32,
+                "grad_output/dx/dw must be float32");
+    // x and w may also come as int8 (already-quantized values) or uint8 (the
+    // forward op's LUT-index images), saved by the autograd Function to cut
+    // activation memory 4x; gradients stay float either way.
+    auto qdtype_ok = [](torch::ScalarType t) {
+        return t == torch::kFloat32 || t == torch::kChar || t == torch::kByte;
+    };
+    TORCH_CHECK(qdtype_ok(x_in.scalar_type()), "x must be float32, int8 or uint8");
+    TORCH_CHECK(qdtype_ok(w_in.scalar_type()), "w must be float32, int8 or uint8");
     TORCH_CHECK(grad_output_in.dim() == 3, "grad_output must have shape [N, O, L]");
     TORCH_CHECK(x_in.dim() == 3, "x must have shape [N, K, L]");
     TORCH_CHECK(w_in.dim() == 2, "w must have shape [K, O]");
@@ -197,12 +224,15 @@ std::tuple<torch::Tensor, torch::Tensor> bgemm_lre_backward_claude_impl(
     TORCH_CHECK(P <= INT32_MAX && K <= INT32_MAX && O <= INT32_MAX,
                 "dimensions too large");
 
+    // gradients are always float32 regardless of x/w dtype
+    auto fopts = x.options().dtype(torch::kFloat32);
+
     if (N == 0 || K == 0 || L == 0 || O == 0) {
-        return std::make_tuple(at::zeros_like(x), at::zeros_like(w));
+        return std::make_tuple(at::zeros({N, K, L}, fopts), at::zeros({K, O}, fopts));
     }
 
-    auto grad_x = at::empty_like(x);
-    auto grad_w = at::empty_like(w);
+    auto grad_x = at::empty({N, K, L}, fopts);
+    auto grad_w = at::empty({K, O}, fopts);
 
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     cublasHandle_t handle = at::cuda::getCurrentCUDABlasHandle();
@@ -217,12 +247,46 @@ std::tuple<torch::Tensor, torch::Tensor> bgemm_lre_backward_claude_impl(
     const float one = 1.0f, zero = 0.0f;
     constexpr int MAP_THREADS = 256;
 
+    // dtype-dispatched launchers for the two LUT-map kernels
+    auto launch_flat = [&](const torch::Tensor& in, const torch::Tensor& lutT,
+                           torch::Tensor& out) {
+        const long long n = in.numel();
+        const int grid = map_grid(n, MAP_THREADS * 4);
+        if (in.scalar_type() == torch::kChar) {
+            lut_map_flat_kernel<int8_t><<<grid, MAP_THREADS, 0, stream>>>(
+                in.data_ptr<int8_t>(), lutT.data_ptr<float>(), out.data_ptr<float>(), n);
+        } else if (in.scalar_type() == torch::kByte) {
+            lut_map_flat_kernel<uint8_t><<<grid, MAP_THREADS, 0, stream>>>(
+                in.data_ptr<uint8_t>(), lutT.data_ptr<float>(), out.data_ptr<float>(), n);
+        } else {
+            lut_map_flat_kernel<float><<<grid, MAP_THREADS, 0, stream>>>(
+                in.data_ptr<float>(), lutT.data_ptr<float>(), out.data_ptr<float>(), n);
+        }
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+    };
+    auto launch_kp = [&](const torch::Tensor& in, const torch::Tensor& lutT,
+                         torch::Tensor& out) {
+        dim3 grid(map_grid(P, MAP_THREADS), 1,
+                  (unsigned)std::min<int64_t>(K, 65535));
+        if (in.scalar_type() == torch::kChar) {
+            lut_map_kp_kernel<int8_t><<<grid, MAP_THREADS, 0, stream>>>(
+                in.data_ptr<int8_t>(), lutT.data_ptr<float>(), out.data_ptr<float>(),
+                (int)N, (int)K, (int)L);
+        } else if (in.scalar_type() == torch::kByte) {
+            lut_map_kp_kernel<uint8_t><<<grid, MAP_THREADS, 0, stream>>>(
+                in.data_ptr<uint8_t>(), lutT.data_ptr<float>(), out.data_ptr<float>(),
+                (int)N, (int)K, (int)L);
+        } else {
+            lut_map_kp_kernel<float><<<grid, MAP_THREADS, 0, stream>>>(
+                in.data_ptr<float>(), lutT.data_ptr<float>(), out.data_ptr<float>(),
+                (int)N, (int)K, (int)L);
+        }
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+    };
+
     // ---- W' = DX[q(w)]  ([K, O]) ----
-    auto wp = at::empty_like(w);
-    lut_map_flat_kernel<<<map_grid(K * O, MAP_THREADS * 4), MAP_THREADS, 0, stream>>>(
-        w.data_ptr<float>(), dx.data_ptr<float>(), wp.data_ptr<float>(),
-        (long long)(K * O));
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    auto wp = at::empty({K, O}, fopts);
+    launch_flat(w, dx, wp);
 
     // ---- grad_x[n] = W' @ go[n] ----
     if (L == 1) {
@@ -265,16 +329,13 @@ std::tuple<torch::Tensor, torch::Tensor> bgemm_lre_backward_claude_impl(
 
     if (batched) {
         // X' in natural [N,K,L]; ws[n] = X'[n] @ go[n]^T; grad_w = sum_n ws[n]
-        auto xp = at::empty_like(x);
-        lut_map_flat_kernel<<<map_grid(N * K * L, MAP_THREADS * 4), MAP_THREADS, 0, stream>>>(
-            x.data_ptr<float>(), dw.data_ptr<float>(), xp.data_ptr<float>(),
-            (long long)(N * K * L));
-        C10_CUDA_KERNEL_LAUNCH_CHECK();
+        auto xp = at::empty({N, K, L}, fopts);
+        launch_flat(x, dw, xp);
 
         float* c_ptr = grad_w.data_ptr<float>();
         torch::Tensor ws;
         if (N > 1) {
-            ws = at::empty({N, K, O}, x.options());
+            ws = at::empty({N, K, O}, fopts);
             c_ptr = ws.data_ptr<float>();
         }
         // row-major C[K,O] = A[K,L] @ (go[O,L])^T
@@ -292,16 +353,8 @@ std::tuple<torch::Tensor, torch::Tensor> bgemm_lre_backward_claude_impl(
         }
     } else {
         // X' in [K, P] layout; grad_w = X'p @ go_nlo  (single GEMM over P)
-        auto xp = at::empty({K, P}, x.options());
-        {
-            dim3 grid(map_grid(P, MAP_THREADS),
-                      1,
-                      (unsigned)std::min<int64_t>(K, 65535));
-            lut_map_kp_kernel<<<grid, MAP_THREADS, 0, stream>>>(
-                x.data_ptr<float>(), dw.data_ptr<float>(), xp.data_ptr<float>(),
-                (int)N, (int)K, (int)L);
-            C10_CUDA_KERNEL_LAUNCH_CHECK();
-        }
+        auto xp = at::empty({K, P}, fopts);
+        launch_kp(x, dw, xp);
 
         torch::Tensor go_nlo;  // [P, O]
         const float* go_nlo_ptr;

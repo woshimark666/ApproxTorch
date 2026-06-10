@@ -100,9 +100,24 @@ def bgemm_fake_int8_gpt(X: Tensor, W: Tensor, lut: Tensor) -> Tensor:
     return torch.ops.approxtorch.bgemm_fake_int8_forward_cuda.default(X, W, lut)
 
 
+# claude-optimized forward, bit-identical to bgemm_fake_int8_gpt (csrc/claude/NOTES.md)
+def bgemm_fake_int8_claude(X: Tensor, W: Tensor, lut: Tensor) -> Tensor:
+    return torch.ops.approxtorch.bgemm_fake_int8_forward_cuda_claude.default(X, W, lut)
+
+
+# same forward, but also returns the internal uint8 quantized images
+# (xq [N,K,L], wq [O,K]) for the autograd Function to save (4x less memory)
+def bgemm_fake_int8_claude_save(X: Tensor, W: Tensor, lut: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    return torch.ops.approxtorch.bgemm_fake_int8_forward_cuda_claude_save.default(X, W, lut)
+
 
 def bgemm_lre_backward(grad_output: Tensor, x: Tensor, w: Tensor, dx: Tensor, dw: Tensor) -> tuple[Tensor, Tensor]:
     return torch.ops.approxtorch.bgemm_lre_backward.default(grad_output, x, w, dx, dw)
+
+
+# claude-optimized LRE backward (LUT prepass + cuBLAS, csrc/claude/NOTES.md)
+def bgemm_lre_backward_claude(grad_output: Tensor, x: Tensor, w: Tensor, dx: Tensor, dw: Tensor) -> tuple[Tensor, Tensor]:
+    return torch.ops.approxtorch.bgemm_lre_backward_claude.default(grad_output, x, w, dx, dw)
 
 
 # bqsg64 with int(fake) x and w  

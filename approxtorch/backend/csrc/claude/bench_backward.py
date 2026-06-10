@@ -121,6 +121,29 @@ def check_correctness(opt_op, ref_op, cfg_op):
                     ok = False
     print("  small shapes:", "pass" if ok else "FAIL")
 
+    # int8 x/w inputs (saved-activation path) must match the float path
+    # bit-for-bit: identical LUT indices -> identical gemms
+    for shape in small + [(8, 64, 100, 32)]:
+        N, K, L, O = shape
+        for noisy in (False, True):
+            go, x, w, dx, dw = make_inputs(N, K, L, O, seed=sum(shape) + 1, noisy=noisy)
+            gx_f, gw_f = opt_op(go, x, w, dx, dw)
+            x8 = x.round().clamp(-128, 127).to(torch.int8)
+            w8 = w.round().clamp(-128, 127).to(torch.int8)
+            gx_i, gw_i = opt_op(go, x8, w8, dx, dw)
+            if not (torch.equal(gx_f, gx_i) and torch.equal(gw_f, gw_i)):
+                print(f"  FAIL int8 path N{N} K{K} L{L} O{O} noisy={noisy} "
+                      f"maxdiff gx={(gx_f-gx_i).abs().max():.2e} gw={(gw_f-gw_i).abs().max():.2e}")
+                ok = False
+            # uint8 (forward op's LUT-index image, +128 offset)
+            xu = (x.round().clamp(-128, 127) + 128).to(torch.uint8)
+            wu = (w.round().clamp(-128, 127) + 128).to(torch.uint8)
+            gx_u, gw_u = opt_op(go, xu, wu, dx, dw)
+            if not (torch.equal(gx_f, gx_u) and torch.equal(gw_f, gw_u)):
+                print(f"  FAIL uint8 path N{N} K{K} L{L} O{O} noisy={noisy}")
+                ok = False
+    print("  int8 input path:", "pass (bit-identical to float path)" if ok else "FAIL")
+
     # bench shapes: grad_x vs reference (fp32-level agreement); grad_w vs an
     # fp64 ground truth for BOTH kernels (accumulation order differs, so the
     # right question is who is closer to the true sum, not opt-vs-ref)
@@ -159,18 +182,20 @@ def bench_fn(fn, *args, warmup=5, iters=30):
 
 def run_bench(opt_op, ref_op, cfg_op, sweep=False, iters=30):
     print("\n== benchmark (end-to-end op call, ms) ==")
-    hdr = f"{'shape (N,K,L,O)':>28} {'ref':>9} {'claude':>9} {'speedup':>8}"
+    hdr = f"{'shape (N,K,L,O)':>28} {'ref':>9} {'claude':>9} {'i8-in':>9} {'speedup':>8}"
     if sweep:
         hdr += "  cfg1(single) cfg2(batched)"
     print(hdr)
     for (N, K, L, O) in SHAPES:
         go, x, w, dx, dw = make_inputs(N, K, L, O, seed=K + O)
+        x8 = x.to(torch.int8); w8 = w.to(torch.int8)
         flops = 4 * N * K * L * O  # 2 GEMMs
         it = max(5, min(iters, int(4e12 / max(flops, 1))))
         t_ref = bench_fn(ref_op, go, x, w, dx, dw, iters=it)
         t_opt = bench_fn(opt_op, go, x, w, dx, dw, iters=it)
-        line = (f"{str((N,K,L,O)):>28} {t_ref:9.3f} {t_opt:9.3f} "
-                f"{t_ref/t_opt:7.2f}x")
+        t_i8 = bench_fn(opt_op, go, x8, w8, dx, dw, iters=it)
+        line = (f"{str((N,K,L,O)):>28} {t_ref:9.3f} {t_opt:9.3f} {t_i8:9.3f} "
+                f"{t_ref/t_i8:7.2f}x")
         if sweep:
             t1 = bench_fn(cfg_op, go, x, w, dx, dw, 1, iters=it)
             t2 = bench_fn(cfg_op, go, x, w, dx, dw, 2, iters=it)

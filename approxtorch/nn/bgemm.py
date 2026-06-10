@@ -12,7 +12,7 @@ class _bgemm_int8_base(Function):
         ctx.dw = dw
         ctx.coeff = coeff
 
-        return at.backend.ops.bgemm_fake_int8_gpt(x, w, lut)
+        return at.backend.ops.bgemm_fake_int8_claude(x, w, lut)
 
 
 
@@ -33,12 +33,25 @@ def bgemm_int8_ste(x, w, lut):
 class _bgemm_int8_lre(_bgemm_int8_base):
 
     @staticmethod
+    def forward(ctx, x, w, lut, dx, dw, coeff):
+        # 主链 float 不变；backward 载荷直接保存 forward 内部现成的 uint8
+        # 量化映像（LUT 索引），不额外做任何 cast：激活保存显存降 4 倍，
+        # backward 算子直接吃 uint8（梯度与 fp32 保存逐位一致）
+        y, xq, wq = at.backend.ops.bgemm_fake_int8_claude_save(x, w, lut)
+        ctx.save_for_backward(xq, wq)
+        ctx.dx = dx
+        ctx.dw = dw
+        ctx.coeff = coeff
+
+        return y
+
+    @staticmethod
     def backward(ctx, grad_outputs):
         x, w = ctx.saved_tensors
-        w = w.transpose(0, 1).contiguous() 
+        w = w.transpose(0, 1).contiguous()
         dx = ctx.dx
         dw = ctx.dw
-        grad_x, grad_w = at.backend.ops.bgemm_lre_backward(grad_output = grad_outputs,
+        grad_x, grad_w = at.backend.ops.bgemm_lre_backward_claude(grad_output = grad_outputs,
                                                    x = x,
                                                    w = w,
                                                    dx = dx,

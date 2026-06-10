@@ -205,3 +205,21 @@ short of fusing the lookup into a custom GEMM.
 Ideas not pursued: two streams to overlap the gx GEMM with the gw chain
 (both near memory-bound, little to gain); custom fused lookup+GEMM
 (loses to cuBLAS); TF32 by default (changes numerics).
+
+## int8/uint8 inputs + forward `_save` hook (plan A, 2026-06-10)
+
+The backward op also accepts x/w as int8 (idx = v+128) or uint8 (idx = v,
+the forward op's LUT-index image); gradients stay float and are
+bit-identical to the float path (indices identical). Both LUT-map
+kernels are templated on input dtype (char4/uchar4 vectorized).
+
+`bgemm_fake_int8_forward_cuda_claude_save(x, w, lut) -> (y, xq, wq)`
+additionally returns the forward's internal u8 quantized images for free
+(they were always computed; plain op = `std::get<0>`). The lre autograd
+Function (`nn/bgemm.py`) saves xq/wq instead of fp32 x/w: saved-activation
+memory 4x down (e.g. B32 C64 56^2 k3 layer: 270 -> 105 MB held after
+forward, the rest is fakequant's scaled_x + misc), backward X'-map reads
+1B/elem instead of 4 (op-level ~1.2x on map-bound shapes), no cast kernels
+anywhere. A first attempt cast fp32->int8 in python; the cast cost
+(~0.36ms on that layer) ate the backward win — exposing the forward's
+existing u8 image is the zero-cost route.

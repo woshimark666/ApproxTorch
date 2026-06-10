@@ -493,7 +493,10 @@ static int pick_cfg_sflat(long long R, long long C)
     return 10;
 }
 
-torch::Tensor bgemm_lut_forward_cuda_claude_cfg(
+// also returns the internal u8 quantized images (xq [N,K,L], wq [O,K]) so a
+// training Function can save them for the LRE backward instead of re-casting
+// the fp32 activations (4x smaller payload, zero extra kernels)
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bgemm_lut_forward_cuda_claude_save_cfg(
     const torch::Tensor& x,
     const torch::Tensor& w,
     const torch::Tensor& lut,
@@ -612,7 +615,16 @@ torch::Tensor bgemm_lut_forward_cuda_claude_cfg(
     else                     dispatch_cfg<SFLAT>(c, a);
 
     CHECK_CUDA_ERROR();
-    return y;
+    return std::make_tuple(y, xq, wq);
+}
+
+torch::Tensor bgemm_lut_forward_cuda_claude_cfg(
+    const torch::Tensor& x,
+    const torch::Tensor& w,
+    const torch::Tensor& lut,
+    int64_t cfg)
+{
+    return std::get<0>(bgemm_lut_forward_cuda_claude_save_cfg(x, w, lut, cfg));
 }
 
 torch::Tensor bgemm_lut_forward_cuda_claude(
@@ -623,14 +635,24 @@ torch::Tensor bgemm_lut_forward_cuda_claude(
     return bgemm_lut_forward_cuda_claude_cfg(x, w, lut, -1);
 }
 
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bgemm_lut_forward_cuda_claude_save(
+    const torch::Tensor& x,
+    const torch::Tensor& w,
+    const torch::Tensor& lut)
+{
+    return bgemm_lut_forward_cuda_claude_save_cfg(x, w, lut, -1);
+}
+
 } // namespace claude_bgemm
 
 TORCH_LIBRARY_FRAGMENT(approxtorch, m){
     m.def("bgemm_fake_int8_forward_cuda_claude(Tensor x, Tensor w, Tensor lut) -> Tensor");
     m.def("bgemm_fake_int8_forward_cuda_claude_cfg(Tensor x, Tensor w, Tensor lut, int cfg) -> Tensor");
+    m.def("bgemm_fake_int8_forward_cuda_claude_save(Tensor x, Tensor w, Tensor lut) -> (Tensor, Tensor, Tensor)");
 }
 
 TORCH_LIBRARY_IMPL(approxtorch, CUDA, m){
     m.impl("bgemm_fake_int8_forward_cuda_claude", &claude_bgemm::bgemm_lut_forward_cuda_claude);
     m.impl("bgemm_fake_int8_forward_cuda_claude_cfg", &claude_bgemm::bgemm_lut_forward_cuda_claude_cfg);
+    m.impl("bgemm_fake_int8_forward_cuda_claude_save", &claude_bgemm::bgemm_lut_forward_cuda_claude_save);
 }
