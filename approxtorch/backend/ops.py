@@ -120,6 +120,32 @@ def bgemm_lre_backward_claude(grad_output: Tensor, x: Tensor, w: Tensor, dx: Ten
     return torch.ops.approxtorch.bgemm_lre_backward_claude.default(grad_output, x, w, dx, dw)
 
 
+# u8 im2col: unfolds a quantized image [N,C,H,W] (int8/uint8/float) straight
+# to uint8 LUT indices [N, C*kh*kw, L] (padding -> index 128). Feeds
+# bgemm_fake_int8_claude(_save) directly, skipping both the fp32 unfold and
+# the forward kernel's fp32->u8 prepass.
+def im2col_u8(feature: Tensor, kernel_size, stride=1, padding=0, dilation=1) -> Tensor:
+    kh, kw = _pair(kernel_size)
+    sh, sw = _pair(stride)
+    ph, pw = _pair(padding)
+    dilh, dilw = _pair(dilation)
+    return torch.ops.approxtorch.im2col_u8.default(
+        feature, kh, kw, sh, sw, ph, pw, dilh, dilw)
+
+
+# out[i] = lut[idx(x[i])] for a [256] LUT; x int8 (idx = v+128), uint8
+# (idx = v) or float32 (idx = round+clamp+128)
+def lut_map(x: Tensor, lut: Tensor) -> Tensor:
+    return torch.ops.approxtorch.lut_map.default(x, lut)
+
+
+# lut_map for an image [N,C,H,W] with constant border: output
+# [N,C,H+2ph,W+2pw], border = lut[128] (what unfold's zero padding maps to)
+def lut_map_pad(x: Tensor, lut: Tensor, padding) -> Tensor:
+    ph, pw = _pair(padding)
+    return torch.ops.approxtorch.lut_map_pad.default(x, lut, ph, pw)
+
+
 # implicit-im2col variant: x is the PRE-unfold quantized image [N,C,H,W]
 # (int8/uint8/float); im2col indices are computed on the fly inside the
 # X' build kernel, the unfolded tensor is never materialized

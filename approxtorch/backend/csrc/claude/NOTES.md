@@ -275,3 +275,40 @@ Cumulative held-after-forward on B32 C64 56^2 k3 (lre):
 270MB (fp32 era) -> 105 (u8 unfold) -> 55 (implicit im2col) -> 37MB
 (+ fused fakequant) = 6.65x; what remains is essentially the int8 image
 (6.4MB) + bool mask (6.4MB) + the live output y itself.
+
+## conv-restructure: u8 im2col forward + cuDNN backward (2026-06-11)
+
+Conv2d_int8_decoupled (lre) no longer goes through F.unfold at all; the
+autograd Function (nn/bgemm.py `_conv2d_int8_lre`) takes the fake-quantized
+IMAGE and returns image-space gradients.
+
+Forward: the fp32 unfold + the bgemm kernel's fp32->u8 prepass were a pure
+bridge (9 B/elem of traffic to produce a 1-byte index). New op `im2col_u8`
+(this file set) unfolds the int8 image straight to u8 LUT indices
+(padding -> 128), and `bgemm_fake_int8_forward_cuda_claude_save` now accepts
+a uint8 x and skips the x prepass. Bit-identical y (round-to-nearest of
+exact integers == +128 cast). im2col_u8 launch notes: cap total blocks at
+~12k and stride k over gridDim.z (1-byte writes make block scheduling the
+bottleneck), uchar4 stores when L % 4 == 0 (0.83 -> 0.23 ms on B64 C64 56^2).
+
+Backward (k != 1): grad_x = fold(W'^T @ go) and grad_w = go @ X'^T are
+EXACTLY conv2d backward-data/-weight with the 1-D LUT maps applied to the
+operands (elementwise map commutes with unfold), so both go to cuDNN
+implicit-GEMM kernels: no X' materialization, no [N,K,L] grad, no fold.
+Padding subtlety: unfold's zero padding maps to dw[128] != 0 while cuDNN
+pads with literal zeros -> `lut_map_pad` bakes lut[128] into an explicit
+border and the weight pass runs with padding=0; the data pass keeps the
+original geometry (input passed as a zero-storage new_empty(1).expand, the
+same trick torch.nn.grad uses). Two separate convolution_backward calls
+beat one call + slicing the padded grad_input by ~27%. cudnn.allow_tf32 is
+forced off inside the Function (torch defaults it ON for conv and would
+silently degrade grads); benchmark=True while shapes repeat in training.
+1x1/s1/p0 keeps the cuBLAS op (cuDNN measured 0.82x there).
+
+Accuracy (test_conv_decoupled.py): y bit-identical to the old pipeline on
+13 geometries (k7 stem, stride-2, dilation, non-square, batch-1, no-bias,
+eval); grads vs fp64 truth 1e-7..4e-7 rel — same order as the old path.
+Speed/memory (bench_module.py, interleaved): whole training step
+1.20-2.18x on k=3 shapes (B64 C64 56^2: 1.50x; CIFAR B128 C16: 2.18x),
+1x1 parity by design; forward+backward peak memory 1207 -> 277 MB on
+B64 C64 56^2 (4.4x), 196 -> 45 MB on CIFAR.

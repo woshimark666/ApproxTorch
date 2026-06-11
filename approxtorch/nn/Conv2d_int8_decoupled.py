@@ -142,38 +142,34 @@ class Conv2d_int8(nn.Module):
         x = fakequant.symmetric_static_quantize_int8_per_tensor(x, self.scale_x, None, self.qmin, self.qmax)
         w, s_w = fakequant.symmetric_dynamic_quantize_int8_per_channel(self.weight, ch_axis=0, bits=self.weight_bits)
 
-        # lre backward 用隐式 im2col：保存 unfold 前的 int8 小图（值已是精确
-        # 整数，cast 无损），展开形态不再保存，比存 unfold 后省 kH*kW 倍
-        xq_pre = None
-        if self.grad == 'lre' and torch.is_grad_enabled() \
-                and (x.requires_grad or self.weight.requires_grad):
-            xq_pre = x.detach().to(torch.int8)
-
-        # 2. im2col shape transform
-        # 1x1 卷积（无 padding）时 unfold 只是一次 gather 复制：
-        # stride=1 直接 view，stride>1 切片再展平，省掉 unfold 的全量复制
-        if self.kernel_size == (1, 1) and self.padding == (0, 0):
-            if self.stride != (1, 1):
-                x = x[:, :, ::sH, ::sW]
-            x = x.flatten(2)  # (N, C, L)
+        # 2. + 3. im2col + bgemm
+        if self.grad == 'lre':
+            # conv 级 Function：内部 int8 图像 -> im2col_u8 直接喂 LUT kernel
+            # （fp32 unfold 和 kernel 的 fp32->u8 prepass 都不再发生），
+            # backward 对 k!=1 走 cuDNN 等价卷积、直接返回图像空间梯度
+            y = bgemm.conv2d_int8_lre(
+                x, w.view(self.out_channels, -1), self.lut, self.dx, self.dw,
+                (kernel_size, self.stride, self.padding, self.dilation))
         else:
-            x = torch.nn.functional.unfold(x, self.kernel_size, dilation=self.dilation, padding=self.padding, stride=self.stride) # (N, CKK, L)
-        w = w.view(self.out_channels, -1) # (O, CKK)
+            # im2col shape transform
+            # 1x1 卷积（无 padding）时 unfold 只是一次 gather 复制：
+            # stride=1 直接 view，stride>1 切片再展平，省掉 unfold 的全量复制
+            if self.kernel_size == (1, 1) and self.padding == (0, 0):
+                if self.stride != (1, 1):
+                    x = x[:, :, ::sH, ::sW]
+                x = x.flatten(2)  # (N, C, L)
+            else:
+                x = torch.nn.functional.unfold(x, self.kernel_size, dilation=self.dilation, padding=self.padding, stride=self.stride) # (N, CKK, L)
+            w = w.view(self.out_channels, -1) # (O, CKK)
 
-        # 3. bgemm
-        match self.grad:
-            case 'ste':
-                y = bgemm.bgemm_int8_ste(x, w, self.lut)
-                # y [N, O, L]]
-            case 'lre':
-                geom = None
-                if xq_pre is not None:
-                    geom = (self.kernel_size, self.stride, self.padding, self.dilation)
-                y = bgemm.bgemm_int8_lre(x, w, self.lut, self.dx, self.dw, xq_pre, geom)
-            case 'bqsg64':
-                y = bgemm.bgemm_int8_bqsg64(x, w , self.lut, self.coefficient)
-            case _:
-                raise ValueError("Invalid gradient method")
+            match self.grad:
+                case 'ste':
+                    y = bgemm.bgemm_int8_ste(x, w, self.lut)
+                    # y [N, O, L]]
+                case 'bqsg64':
+                    y = bgemm.bgemm_int8_bqsg64(x, w , self.lut, self.coefficient)
+                case _:
+                    raise ValueError("Invalid gradient method")
 
         # 4. reshape, de-quantization and bias
         # 先把标量 scale_x 和 per-channel s_w 乘成一个 [O] 向量（s_x、s_w 都

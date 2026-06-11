@@ -204,6 +204,108 @@ __global__ void lut_map_kp_im2col_kernel(
     }
 }
 
+// u8 im2col: out[n, k, l] = LUT index of unfold(x)[n, k, l] (out-of-bounds ==
+// zero padding == index 128). Same implicit indexing as the X' build kernel
+// above, but batch-major [N, K, L] output (the forward kernel's natural x
+// layout) and 1-byte writes — this feeds the LUT-BGEMM forward directly, so
+// the fp32 unfolded tensor and the forward's fp32->u8 prepass both disappear.
+// VEC == 4 (requires L % 4 == 0, so every row offset stays 4-byte aligned):
+// each thread emits one uchar4 of consecutive l positions with a single
+// divide -- 1-byte scalar stores leave this kernel far below write bandwidth.
+template <typename T, int VEC>
+__global__ void im2col_u8_kernel(
+    const T* __restrict__ x,        // [N, C, H, W]
+    uint8_t* __restrict__ out,      // [N, K = C*KH*KW, L = OH*OW]
+    int N, int C, int H, int W,
+    int KH, int KW, int SH, int SW,
+    int PH, int PW, int DH, int DW,
+    int OH, int OW
+) {
+    const int L = OH * OW;
+    const int K = C * KH * KW;
+    const int nq = L / VEC;
+    const int qstride = gridDim.x * blockDim.x;
+    for (int k = blockIdx.z; k < K; k += gridDim.z) {
+        const int c   = k / (KH * KW);
+        const int r   = k - c * (KH * KW);
+        const int kh  = r / KW;
+        const int kw  = r - kh * KW;
+        const int ih0 = kh * DH - PH;
+        const int iw0 = kw * DW - PW;
+        for (int n = blockIdx.y; n < N; n += gridDim.y) {
+            const T* xnc = x + ((long long)n * C + c) * H * W;
+            uint8_t* on = out + ((long long)n * K + k) * L;
+            for (int q = blockIdx.x * blockDim.x + threadIdx.x; q < nq; q += qstride) {
+                const int l = q * VEC;
+                int oh = l / OW;
+                int ow = l - oh * OW;
+                if constexpr (VEC == 4) {
+                    uchar4 v;
+                    uint8_t* vb = reinterpret_cast<uint8_t*>(&v);
+#pragma unroll
+                    for (int j = 0; j < 4; ++j) {
+                        const int ih = oh * SH + ih0;
+                        const int iw = ow * SW + iw0;
+                        int idx = 128;  // zero padding -> quantized zero
+                        if ((unsigned)ih < (unsigned)H && (unsigned)iw < (unsigned)W) {
+                            idx = lut_idx_of(xnc[(long long)ih * W + iw]);
+                        }
+                        vb[j] = (uint8_t)idx;
+                        if (++ow == OW) { ow = 0; ++oh; }
+                    }
+                    *reinterpret_cast<uchar4*>(on + l) = v;
+                } else {
+                    const int ih = oh * SH + ih0;
+                    const int iw = ow * SW + iw0;
+                    int idx = 128;  // zero padding -> quantized zero
+                    if ((unsigned)ih < (unsigned)H && (unsigned)iw < (unsigned)W) {
+                        idx = lut_idx_of(xnc[(long long)ih * W + iw]);
+                    }
+                    on[l] = (uint8_t)idx;
+                }
+            }
+        }
+    }
+}
+
+// out[n, c, ph + h, pw + w] = lut[idx(x[n, c, h, w])], border = lut[128].
+// Builds the DW-mapped, constant-padded image the cuDNN grad_weight pass
+// needs in one kernel: cuDNN pads with literal 0 while unfold's padding maps
+// to LUT index 128, so the pad value (lut[128], generally nonzero) is baked
+// in here and the convolution_backward call runs with padding = 0.
+template <typename T>
+__global__ void lut_map_pad_kernel(
+    const T* __restrict__ x,        // [N, C, H, W]
+    const float* __restrict__ lut,
+    float* __restrict__ out,        // [N, C, H + 2*PH, W + 2*PW]
+    int N, int C, int H, int W, int PH, int PW
+) {
+    __shared__ float slut[256];
+    for (int i = threadIdx.x; i < 256; i += blockDim.x) slut[i] = lut[i];
+    __syncthreads();
+
+    const int WP = W + 2 * PW;
+    const int hw = (H + 2 * PH) * WP;
+    const int stride = gridDim.x * blockDim.x;
+    for (int n = blockIdx.z; n < N; n += gridDim.z) {
+        for (int c = blockIdx.y; c < C; c += gridDim.y) {
+            const T* xin = x + ((long long)n * C + c) * H * W;
+            float* o = out + ((long long)n * C + c) * hw;
+            for (int t = blockIdx.x * blockDim.x + threadIdx.x; t < hw; t += stride) {
+                const int hp = t / WP;
+                const int wp = t - hp * WP;
+                const int h = hp - PH;
+                const int w = wp - PW;
+                float v = slut[128];
+                if ((unsigned)h < (unsigned)H && (unsigned)w < (unsigned)W) {
+                    v = slut[lut_idx_of(xin[(long long)h * W + w])];
+                }
+                o[t] = v;
+            }
+        }
+    }
+}
+
 // Batched 2-D transpose: out[n, l, o] = in[n, o, l]  (32x32 smem tiles)
 constexpr int TR_TILE = 32;
 constexpr int TR_ROWS = 8;
@@ -630,6 +732,121 @@ std::tuple<torch::Tensor, torch::Tensor> bgemm_lre_backward_claude_im2col_impl(
     return std::make_tuple(grad_x, grad_w);
 }
 
+// ---- standalone helper ops (u8 im2col + LUT maps for the cuDNN backward) ----
+
+torch::Tensor im2col_u8_impl(
+    const torch::Tensor& x_in,      // [N, C, H, W] quantized image
+    int64_t kh, int64_t kw, int64_t sh, int64_t sw,
+    int64_t ph, int64_t pw, int64_t dilh, int64_t dilw
+) {
+    TORCH_CHECK(x_in.is_cuda(), "x must be a CUDA tensor");
+    TORCH_CHECK(qdtype_ok(x_in.scalar_type()), "x must be float32, int8 or uint8");
+    TORCH_CHECK(x_in.dim() == 4, "x must have shape [N, C, H, W]");
+    TORCH_CHECK(kh >= 1 && kw >= 1 && sh >= 1 && sw >= 1 && ph >= 0 && pw >= 0
+                && dilh >= 1 && dilw >= 1, "invalid conv geometry");
+
+    const at::cuda::OptionalCUDAGuard device_guard(device_of(x_in));
+    auto x = x_in.contiguous();
+
+    const int64_t N = x.size(0);
+    const int64_t C = x.size(1);
+    const int64_t H = x.size(2);
+    const int64_t W = x.size(3);
+    const int64_t K = C * kh * kw;
+    const int64_t OH = (H + 2 * ph - dilh * (kh - 1) - 1) / sh + 1;
+    const int64_t OW = (W + 2 * pw - dilw * (kw - 1) - 1) / sw + 1;
+    TORCH_CHECK(OH >= 1 && OW >= 1, "conv geometry yields empty output");
+    const int64_t L = OH * OW;
+    TORCH_CHECK(N * L <= INT32_MAX && K <= INT32_MAX, "dimensions too large");
+
+    auto out = at::empty({N, K, L}, x.options().dtype(torch::kByte));
+    if (out.numel() == 0) return out;
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    // u8 writes carry only 1 byte per thread, so block scheduling overhead
+    // dominates if every (n, k) pair gets its own block (the fp32 X' build
+    // above hides that under 4x the bytes). Cap the total block count and
+    // let each block stride over k instead; uchar4 stores when L allows.
+    const int vec = (L % 4 == 0) ? 4 : 1;
+    const int64_t gx = map_grid(L / vec, MAP_THREADS);
+    const int64_t gy = std::min<int64_t>(N, 65535);
+    const int64_t gz = std::min<int64_t>(K, std::max<int64_t>(1, 12288 / (gx * gy)));
+    dim3 grid((unsigned)gx, (unsigned)gy, (unsigned)gz);
+    auto launch = [&](auto* xp) {
+        using T = std::remove_const_t<std::remove_pointer_t<decltype(xp)>>;
+        auto args = [&](auto kern) {
+            kern<<<grid, MAP_THREADS, 0, stream>>>(
+                xp, out.data_ptr<uint8_t>(),
+                (int)N, (int)C, (int)H, (int)W, (int)kh, (int)kw, (int)sh, (int)sw,
+                (int)ph, (int)pw, (int)dilh, (int)dilw, (int)OH, (int)OW);
+        };
+        if (vec == 4) args(im2col_u8_kernel<T, 4>);
+        else args(im2col_u8_kernel<T, 1>);
+    };
+    if (x.scalar_type() == torch::kChar) launch(x.data_ptr<int8_t>());
+    else if (x.scalar_type() == torch::kByte) launch(x.data_ptr<uint8_t>());
+    else launch(x.data_ptr<float>());
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
+}
+
+torch::Tensor lut_map_impl(const torch::Tensor& x_in, const torch::Tensor& lut_in) {
+    TORCH_CHECK(x_in.is_cuda() && lut_in.is_cuda(), "tensors must be CUDA");
+    TORCH_CHECK(qdtype_ok(x_in.scalar_type()), "x must be float32, int8 or uint8");
+    TORCH_CHECK(lut_in.scalar_type() == torch::kFloat32, "lut must be float32");
+    TORCH_CHECK(lut_in.numel() == 256, "lut must have 256 elements");
+
+    const at::cuda::OptionalCUDAGuard device_guard(device_of(x_in));
+    auto x = x_in.contiguous();
+    auto lut = lut_in.contiguous();
+    auto out = at::empty(x.sizes(), x.options().dtype(torch::kFloat32));
+    if (out.numel() == 0) return out;
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    launch_lut_map_flat(stream, x, lut, out);
+    return out;
+}
+
+torch::Tensor lut_map_pad_impl(
+    const torch::Tensor& x_in, const torch::Tensor& lut_in,
+    int64_t ph, int64_t pw
+) {
+    TORCH_CHECK(x_in.is_cuda() && lut_in.is_cuda(), "tensors must be CUDA");
+    TORCH_CHECK(qdtype_ok(x_in.scalar_type()), "x must be float32, int8 or uint8");
+    TORCH_CHECK(lut_in.scalar_type() == torch::kFloat32, "lut must be float32");
+    TORCH_CHECK(lut_in.numel() == 256, "lut must have 256 elements");
+    TORCH_CHECK(x_in.dim() == 4, "x must have shape [N, C, H, W]");
+    TORCH_CHECK(ph >= 0 && pw >= 0, "padding must be non-negative");
+
+    const at::cuda::OptionalCUDAGuard device_guard(device_of(x_in));
+    auto x = x_in.contiguous();
+    auto lut = lut_in.contiguous();
+
+    const int64_t N = x.size(0);
+    const int64_t C = x.size(1);
+    const int64_t H = x.size(2);
+    const int64_t W = x.size(3);
+    auto out = at::empty({N, C, H + 2 * ph, W + 2 * pw},
+                         x.options().dtype(torch::kFloat32));
+    if (out.numel() == 0) return out;
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    const int64_t hw = (H + 2 * ph) * (W + 2 * pw);
+    dim3 grid(map_grid(hw, MAP_THREADS),
+              (unsigned)std::min<int64_t>(C, 65535),
+              (unsigned)std::min<int64_t>(N, 65535));
+    auto launch = [&](auto* xp) {
+        using T = std::remove_const_t<std::remove_pointer_t<decltype(xp)>>;
+        lut_map_pad_kernel<T><<<grid, MAP_THREADS, 0, stream>>>(
+            xp, lut.data_ptr<float>(), out.data_ptr<float>(),
+            (int)N, (int)C, (int)H, (int)W, (int)ph, (int)pw);
+    };
+    if (x.scalar_type() == torch::kChar) launch(x.data_ptr<int8_t>());
+    else if (x.scalar_type() == torch::kByte) launch(x.data_ptr<uint8_t>());
+    else launch(x.data_ptr<float>());
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
+}
+
 }  // namespace
 
 std::tuple<torch::Tensor, torch::Tensor> bgemm_lre_backward_claude(
@@ -656,14 +873,36 @@ std::tuple<torch::Tensor, torch::Tensor> bgemm_lre_backward_claude_im2col(
         grad_output, x, w, dx, dw, kh, kw, sh, sw, ph, pw, dilh, dilw);
 }
 
+torch::Tensor im2col_u8(
+    torch::Tensor x,
+    int64_t kh, int64_t kw, int64_t sh, int64_t sw,
+    int64_t ph, int64_t pw, int64_t dilh, int64_t dilw
+) {
+    return im2col_u8_impl(x, kh, kw, sh, sw, ph, pw, dilh, dilw);
+}
+
+torch::Tensor lut_map(torch::Tensor x, torch::Tensor lut) {
+    return lut_map_impl(x, lut);
+}
+
+torch::Tensor lut_map_pad(torch::Tensor x, torch::Tensor lut, int64_t ph, int64_t pw) {
+    return lut_map_pad_impl(x, lut, ph, pw);
+}
+
 TORCH_LIBRARY_FRAGMENT(approxtorch, m) {
     m.def("bgemm_lre_backward_claude(Tensor grad_output, Tensor x, Tensor w, Tensor dx, Tensor dw) -> (Tensor, Tensor)");
     m.def("bgemm_lre_backward_claude_cfg(Tensor grad_output, Tensor x, Tensor w, Tensor dx, Tensor dw, int cfg) -> (Tensor, Tensor)");
     m.def("bgemm_lre_backward_claude_im2col(Tensor grad_output, Tensor x, Tensor w, Tensor dx, Tensor dw, int kh, int kw, int sh, int sw, int ph, int pw, int dilh, int dilw) -> (Tensor, Tensor)");
+    m.def("im2col_u8(Tensor x, int kh, int kw, int sh, int sw, int ph, int pw, int dilh, int dilw) -> Tensor");
+    m.def("lut_map(Tensor x, Tensor lut) -> Tensor");
+    m.def("lut_map_pad(Tensor x, Tensor lut, int ph, int pw) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(approxtorch, CUDA, m) {
     m.impl("bgemm_lre_backward_claude", &bgemm_lre_backward_claude);
     m.impl("bgemm_lre_backward_claude_cfg", &bgemm_lre_backward_claude_cfg);
     m.impl("bgemm_lre_backward_claude_im2col", &bgemm_lre_backward_claude_im2col);
+    m.impl("im2col_u8", &im2col_u8);
+    m.impl("lut_map", &lut_map);
+    m.impl("lut_map_pad", &lut_map_pad);
 }

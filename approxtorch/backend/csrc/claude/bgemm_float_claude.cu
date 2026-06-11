@@ -506,7 +506,11 @@ static int pick_cfg_sflat(long long R, long long C)
 
 // also returns the internal u8 quantized images (xq [N,K,L], wq [O,K]) so a
 // training Function can save them for the LRE backward instead of re-casting
-// the fp32 activations (4x smaller payload, zero extra kernels)
+// the fp32 activations (4x smaller payload, zero extra kernels).
+//
+// x is accepted as float32 (quantized integer values; prepass converts to u8
+// LUT indices) OR uint8 (already LUT indices, e.g. from im2col_u8; the x
+// prepass is skipped entirely and the returned xq aliases the input).
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bgemm_lut_forward_cuda_claude_save_cfg(
     const torch::Tensor& x,
     const torch::Tensor& w,
@@ -518,7 +522,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bgemm_lut_forward_cuda_c
     TORCH_CHECK(x.is_cuda(), "x must be a CUDA tensor");
     TORCH_CHECK(w.is_cuda(), "w must be a CUDA tensor");
     TORCH_CHECK(lut.is_cuda(), "lut must be a CUDA tensor");
-    TORCH_CHECK(x.scalar_type() == torch::kFloat32, "x must be float32");
+    TORCH_CHECK(x.scalar_type() == torch::kFloat32
+                || x.scalar_type() == torch::kByte,
+                "x must be float32 or uint8 (LUT indices)");
     TORCH_CHECK(w.scalar_type() == torch::kFloat32, "w must be float32");
     TORCH_CHECK(lut.scalar_type() == torch::kFloat32, "lut must be float32");
     TORCH_CHECK(x.dim() == 3, "x must have shape [N, CKK, L]");
@@ -538,14 +544,14 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bgemm_lut_forward_cuda_c
     TORCH_CHECK(NL <= INT32_MAX, "N * L too large");
 
     auto stream = at::cuda::getCurrentCUDAStream();
+    auto f32opts = xc.options().dtype(torch::kFloat32);
     auto u8opts = xc.options().dtype(torch::kUInt8);
 
-    // prepass: quantize x and w to uint8 LUT indices
-    auto xq = torch::empty({N, K, L}, u8opts);
+    // prepass: quantize x and w to uint8 LUT indices (skipped for x when the
+    // caller already provides the u8 index image)
+    torch::Tensor xq;
     auto wq = torch::empty({O, K}, u8opts);
     {
-        const long long xn = static_cast<long long>(N) * K * L;
-        const long long wn = static_cast<long long>(O) * K;
         const int threads = 256;
         auto launch_quant = [&](const float* in, uint8_t* out, long long n) {
             const bool vec = ptr_aligned(in, 16) && ptr_aligned(out, 4);
@@ -554,11 +560,18 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bgemm_lut_forward_cuda_c
             if (vec) quantize_to_u8_kernel<4><<<blocks, threads, 0, stream>>>(in, out, n);
             else     quantize_to_u8_kernel<1><<<blocks, threads, 0, stream>>>(in, out, n);
         };
-        launch_quant(xc.data_ptr<float>(), xq.data_ptr<uint8_t>(), xn);
-        launch_quant(wc.data_ptr<float>(), wq.data_ptr<uint8_t>(), wn);
+        if (xc.scalar_type() == torch::kByte) {
+            xq = xc;
+        } else {
+            xq = torch::empty({N, K, L}, u8opts);
+            launch_quant(xc.data_ptr<float>(), xq.data_ptr<uint8_t>(),
+                         static_cast<long long>(N) * K * L);
+        }
+        launch_quant(wc.data_ptr<float>(), wq.data_ptr<uint8_t>(),
+                     static_cast<long long>(O) * K);
     }
 
-    auto y = torch::empty({N, O, L}, xc.options());
+    auto y = torch::empty({N, O, L}, f32opts);
 
     // mode selection: cfg -1 = auto; 0..14 = force NFLAT/XMK cfg;
     // 100..114 = force SFLAT cfg (tuning hooks for the bench harness)
@@ -584,7 +597,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bgemm_lut_forward_cuda_c
     LaunchArgs a{
         nullptr, nullptr, lutc.data_ptr<float>(), nullptr, nullptr,
         y.data_ptr<float>(),
-        K, 0, 0, L, O, xc.options(), stream.stream()
+        K, 0, 0, L, O, f32opts, stream.stream()
     };
 
     // LUT images: int16 (+ transposed copies for SFLAT) and validity flag
