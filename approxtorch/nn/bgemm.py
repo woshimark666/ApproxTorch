@@ -138,13 +138,82 @@ def conv2d_int8_lre(x, w, lut, dx, dw, geom):
     return _conv2d_int8_lre.apply(x, w, lut, dx, dw, geom)
 
 
-def conv2d_int8_ste(x, w, lut, id_lut, geom):
-    # STE 就是恒等 LUT 的 LRE：DX[q(w)] = q(w)、DW[q(x)] = q(x) 时上面的
-    # backward 恰好退化成 grad_x = W^T·go、grad_w = go·X^T（即原 einsum 对）。
-    # 顺带 padding 也自动正确：恒等 LUT 下 lut[128] = 0，与 cuDNN 的 0 padding
-    # 一致。激活保存从 fp32 unfold 矩阵变成 int8 小图 + uint8 权重。
-    # id_lut: arange(256) - 128 的 fp32 CUDA 张量（模块持有，免每步重建）。
-    return _conv2d_int8_lre.apply(x, w, lut, id_lut, id_lut, geom)
+# 1x1 ste backward 用的 cuBLAS op 需要一张 [256] 解码表把保存的 uint8 索引
+# 还原成量化值（v = idx - 128）；按 device 缓存，免每步重建
+_u8_decode_tables = {}
+def _u8_decode_table(device):
+    t = _u8_decode_tables.get(device)
+    if t is None:
+        t = torch.arange(256, device=device, dtype=torch.float32) - 128
+        _u8_decode_tables[device] = t
+    return t
+
+
+class _conv2d_int8_ste(Function):
+    # conv 级 STE Function。STE 把近似乘法器当精确乘法看待，所以反传就是
+    # 普通矩阵乘的梯度（原 einsum 对）：
+    #     grad_x = W^T·go（unfold 空间，再 fold 回图像）
+    #     grad_w = go·X^T
+    # 而 "einsum + fold" 在数学上恰好就是普通卷积的 backward-data /
+    # backward-weight，所以整体交给 cuDNN 的 convolution_backward —— 梯度
+    # 数值与 einsum 相同（仅求和顺序不同，fp32 round-off 级差异）。
+    #
+    # forward 与 lre 共用 u8 im2col 路径（y 逐位一致）；backward 载荷从
+    # fp32 unfold 矩阵 (+ fp32 w) 变成 int8 图像 + uint8 权重索引，
+    # 反传时解码回量化值（精确整数，cast 无损）。
+    # STE 下量化 0 就是真 0，padding 无需任何特殊处理。
+
+    @staticmethod
+    def forward(ctx, x, w, lut, geom):
+        kernel_size, stride, padding, dilation = geom
+        xq8 = x.detach().to(torch.int8)
+        xu8 = at.backend.ops.im2col_u8(xq8, kernel_size, stride, padding, dilation)
+        y, _, wq = at.backend.ops.bgemm_fake_int8_claude_save(xu8, w, lut)
+        ctx.save_for_backward(xq8, wq)
+        ctx.geom = geom
+        return y
+
+    @staticmethod
+    def backward(ctx, grad_outputs):
+        xq8, wq = ctx.saved_tensors
+        (kh, kw), (sh, sw), (ph, pw), (dilh, dilw) = ctx.geom
+        B, C, H, W = xq8.shape
+        O = wq.shape[0]
+
+        if (kh, kw, sh, sw, ph, pw, dilh, dilw) == (1, 1, 1, 1, 0, 0, 1, 1):
+            # 1x1：图像本身就是展开矩阵，cuBLAS op 比 cuDNN 快（实测 0.82x）。
+            # op 内部先按解码表还原数值、再做的两个 GEMM 就是上面的 einsum 对
+            dec = _u8_decode_table(xq8.device)
+            grad_x, grad_w = at.backend.ops.bgemm_lre_backward_claude(
+                grad_output=grad_outputs, x=xq8.flatten(2),
+                w=wq.transpose(0, 1).contiguous(), dx=dec, dw=dec)
+            return (grad_x.view(B, C, H, W),
+                    grad_w.transpose(0, 1).contiguous(), None, None)
+
+        OH = (H + 2 * ph - dilh * (kh - 1) - 1) // sh + 1
+        OW = (W + 2 * pw - dilw * (kw - 1) - 1) // sw + 1
+        go = grad_outputs.reshape(B, O, OH, OW)
+        xf = xq8.float()                                  # 量化值，精确整数
+        wf = (wq.float() - 128.0).view(O, C, kh, kw)      # u8 索引 -> 量化值
+
+        # 与 cuBLAS 同精度（torch 对 conv 默认开 TF32，会悄悄降梯度精度）；
+        # 训练中形状固定，benchmark 让 cuDNN 选最优算法
+        prev_tf32 = torch.backends.cudnn.allow_tf32
+        prev_bench = torch.backends.cudnn.benchmark
+        torch.backends.cudnn.allow_tf32 = False
+        torch.backends.cudnn.benchmark = True
+        try:
+            grad_x, grad_w, _ = torch.ops.aten.convolution_backward(
+                go, xf, wf, None, [sh, sw], [ph, pw], [dilh, dilw],
+                False, [0, 0], 1, [True, True, False])
+        finally:
+            torch.backends.cudnn.allow_tf32 = prev_tf32
+            torch.backends.cudnn.benchmark = prev_bench
+
+        return grad_x, grad_w.reshape(O, -1), None, None
+
+def conv2d_int8_ste(x, w, lut, geom):
+    return _conv2d_int8_ste.apply(x, w, lut, geom)
 
 
 class _bgemm_int8_bqsg64(_bgemm_int8_base):

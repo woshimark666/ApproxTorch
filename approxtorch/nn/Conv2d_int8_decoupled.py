@@ -83,11 +83,7 @@ class Conv2d_int8(nn.Module):
 
         match grad:
             case 'ste':
-                # STE 梯度 = 恒等 LUT 的 LRE（见 bgemm.conv2d_int8_ste），
-                # 与 lre 共用 conv 级 claude 路径；persistent=False 不进 state_dict
-                self.register_buffer('id_grad_lut',
-                                     torch.arange(256, dtype=torch.float32) - 128,
-                                     persistent=False)
+                pass
             case 'lre':
                 self.register_buffer('dx', dx)
                 self.register_buffer('dw', dw)
@@ -150,15 +146,15 @@ class Conv2d_int8(nn.Module):
         if self.grad in ('lre', 'ste'):
             # conv 级 Function：内部 int8 图像 -> im2col_u8 直接喂 LUT kernel
             # （fp32 unfold 和 kernel 的 fp32->u8 prepass 都不再发生），
-            # backward 对 k!=1 走 cuDNN 等价卷积、直接返回图像空间梯度；
-            # ste = 恒等 LUT 的 lre，同一条路径
+            # backward 对 k!=1 走 cuDNN 等价卷积、直接返回图像空间梯度。
+            # ste 的反传 = 普通卷积反传（einsum 对的卷积形式），见 bgemm.py
             geom = (kernel_size, self.stride, self.padding, self.dilation)
             if self.grad == 'lre':
                 y = bgemm.conv2d_int8_lre(
                     x, w.view(self.out_channels, -1), self.lut, self.dx, self.dw, geom)
             else:
                 y = bgemm.conv2d_int8_ste(
-                    x, w.view(self.out_channels, -1), self.lut, self.id_grad_lut, geom)
+                    x, w.view(self.out_channels, -1), self.lut, geom)
         else:
             # im2col shape transform
             # 1x1 卷积（无 padding）时 unfold 只是一次 gather 复制：

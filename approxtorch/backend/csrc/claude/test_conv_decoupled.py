@@ -209,7 +209,7 @@ check('k1 s1 p0 batch1',         1, 16, 20, 20, 24, 1, 1, 0)
 check('k3 s1 p1 H!=W',           4, 16, 24, 18, 24, 3, 1, 1)
 check('k3 s1 p1 cifar tiny',     16, 16, 32, 32, 16, 3, 1, 1)
 
-print('--- ste (identity-LUT lre) ---')
+print('--- ste (backward == plain conv backward on quantized values) ---')
 check('ste k3 s1 p1 resnet block', 8, 64, 28, 28, 64, 3, 1, 1, mode='ste')
 check('ste k3 s2 p1 downsample',   8, 64, 28, 28, 128, 3, 2, 1, mode='ste')
 check('ste k1 s1 p0 bottleneck',   8, 64, 28, 28, 256, 1, 1, 0, mode='ste')

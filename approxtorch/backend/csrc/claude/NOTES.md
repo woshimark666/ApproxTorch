@@ -313,17 +313,24 @@ Speed/memory (bench_module.py, interleaved): whole training step
 1x1 parity by design; forward+backward peak memory 1207 -> 277 MB on
 B64 C64 56^2 (4.4x), 196 -> 45 MB on CIFAR.
 
-## ste = identity-LUT lre (2026-06-11)
+## ste conv path: backward == plain conv backward (2026-06-11)
 
-STE's einsum backward (grad_x = W^T·go, grad_w = go·X^T on quantized
-values) is exactly the LRE backward with DX[i] = DW[i] = i - 128, so
-Conv2d_int8_decoupled (ste) now routes through the same conv-level
-Function (`bgemm.conv2d_int8_ste` -> `_conv2d_int8_lre` with an identity
-LUT held as a persistent=False module buffer). The padding subtlety
-vanishes: identity lut[128] = 0 matches cuDNN's zero padding. Activation
-saving drops from the fp32 unfolded [N,K,L] (+ fp32 w) to the int8 image
-+ u8 wq. Whole step 1.04-2.53x (B64 C64 56^2: 2.24x, peak 1537 -> 277 MB;
-CIFAR: 2.53x, 250 -> 45 MB); unlike lre, 1x1 also gains (1.19x) because
-the old einsum path was unoptimized there. Same test matrix: y
-bit-identical, grads 1e-7 rel vs fp64. bqsg64 is the only remaining
-unfold user in the module.
+STE treats the approximate multiplier as exact in the backward pass, so
+its gradients are the ordinary matmul pair grad_x = W^T·go (unfold space,
+folded back) and grad_w = go·X^T on the QUANTIZED values — and
+"einsum + fold" is mathematically conv2d backward-data/-weight. The
+dedicated Function (`bgemm.conv2d_int8_ste`) shares the u8-im2col forward
+with lre (y bit-identical), saves only the int8 image + u8 weight indices
+(old einsum Function kept the fp32 unfolded [N,K,L] + fp32 w alive), and
+in backward decodes them with plain casts (values are exact integers) and
+makes ONE convolution_backward call with the original geometry — no LUT
+involved, and no pad fix-up either since quantized zero padding is real
+zero. 1x1/s1/p0 uses the cuBLAS backward op with a [256] u8->value decode
+table (its lookup stage is just that decode; its GEMM stage is exactly
+the einsum pair, batched without permute copies).
+
+Whole step 1.02-3.1x (B64 C64 56^2: 2.2x, peak 1537 -> 273 MB; CIFAR:
+2.5-3.1x across runs, 250 -> 44 MB); unlike lre, 1x1 also gains (1.2x)
+because the old einsum path was unoptimized there. Same test matrix as
+lre: y bit-identical, grads 1e-7 rel vs the fp64 einsum-formula truth.
+bqsg64 is the only remaining unfold user in the module.
