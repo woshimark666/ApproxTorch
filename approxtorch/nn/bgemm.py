@@ -138,6 +138,15 @@ def conv2d_int8_lre(x, w, lut, dx, dw, geom):
     return _conv2d_int8_lre.apply(x, w, lut, dx, dw, geom)
 
 
+def conv2d_int8_ste(x, w, lut, id_lut, geom):
+    # STE 就是恒等 LUT 的 LRE：DX[q(w)] = q(w)、DW[q(x)] = q(x) 时上面的
+    # backward 恰好退化成 grad_x = W^T·go、grad_w = go·X^T（即原 einsum 对）。
+    # 顺带 padding 也自动正确：恒等 LUT 下 lut[128] = 0，与 cuDNN 的 0 padding
+    # 一致。激活保存从 fp32 unfold 矩阵变成 int8 小图 + uint8 权重。
+    # id_lut: arange(256) - 128 的 fp32 CUDA 张量（模块持有，免每步重建）。
+    return _conv2d_int8_lre.apply(x, w, lut, id_lut, id_lut, geom)
+
+
 class _bgemm_int8_bqsg64(_bgemm_int8_base):
 
     @staticmethod

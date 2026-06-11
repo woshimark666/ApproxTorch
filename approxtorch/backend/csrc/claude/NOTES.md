@@ -312,3 +312,18 @@ Speed/memory (bench_module.py, interleaved): whole training step
 1.20-2.18x on k=3 shapes (B64 C64 56^2: 1.50x; CIFAR B128 C16: 2.18x),
 1x1 parity by design; forward+backward peak memory 1207 -> 277 MB on
 B64 C64 56^2 (4.4x), 196 -> 45 MB on CIFAR.
+
+## ste = identity-LUT lre (2026-06-11)
+
+STE's einsum backward (grad_x = W^T·go, grad_w = go·X^T on quantized
+values) is exactly the LRE backward with DX[i] = DW[i] = i - 128, so
+Conv2d_int8_decoupled (ste) now routes through the same conv-level
+Function (`bgemm.conv2d_int8_ste` -> `_conv2d_int8_lre` with an identity
+LUT held as a persistent=False module buffer). The padding subtlety
+vanishes: identity lut[128] = 0 matches cuDNN's zero padding. Activation
+saving drops from the fp32 unfolded [N,K,L] (+ fp32 w) to the int8 image
++ u8 wq. Whole step 1.04-2.53x (B64 C64 56^2: 2.24x, peak 1537 -> 277 MB;
+CIFAR: 2.53x, 250 -> 45 MB); unlike lre, 1x1 also gains (1.19x) because
+the old einsum path was unoptimized there. Same test matrix: y
+bit-identical, grads 1e-7 rel vs fp64. bqsg64 is the only remaining
+unfold user in the module.

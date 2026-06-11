@@ -25,9 +25,9 @@ def relerr(a, b):
     return ((a.double() - b).norm() / (b.norm() + 1e-30)).item()
 
 
-# old conv lre path: fp32 unfold (autograd) + gemm-level claude Function.
-# Identical math to the pre-change module (the removed xq_pre/im2col variant
-# was bit-identical to this by its own op tests).
+# old conv path: fp32 unfold (autograd) + gemm-level Function.
+# lre: claude gemm-level op (bit-identical to pre-change module by its own
+# op tests). ste: the original einsum-backward Function saving fp32.
 def old_path(m, x):
     B = x.shape[0]
     O, C, kH, kW = m.weight.shape
@@ -37,7 +37,10 @@ def old_path(m, x):
         m.weight, ch_axis=0, bits=m.weight_bits)
     xu = F.unfold(xq, m.kernel_size, dilation=m.dilation,
                   padding=m.padding, stride=m.stride)
-    y = bgemm.bgemm_int8_lre(xu, w.view(O, -1), m.lut, m.dx, m.dw)
+    if m.grad == 'ste':
+        y = bgemm.bgemm_int8_ste(xu, w.view(O, -1), m.lut)
+    else:
+        y = bgemm.bgemm_int8_lre(xu, w.view(O, -1), m.lut, m.dx, m.dw)
     H, W = x.shape[2], x.shape[3]
     OH = (H + 2*m.padding[0] - m.dilation[0]*(kH-1) - 1)//m.stride[0] + 1
     OW = (W + 2*m.padding[1] - m.dilation[1]*(kW-1) - 1)//m.stride[1] + 1
@@ -86,11 +89,16 @@ def fp64_grads(m, x, go):
         else:
             g_bias = None
         g_raw = (go64 * s).view(B, O, L)                # grad wrt bgemm output
-        # lre backward in fp64
+        # lre backward in fp64 (ste == identity LUTs: DX[q]=q, DW[q]=q)
+        if m.grad == 'ste':
+            dxl = (torch.arange(256, device=x.device) - 128).double()
+            dwl = dxl
+        else:
+            dxl, dwl = m.dx.double(), m.dw.double()
         xidx = (xu + 128).long()
         widx = (wf + 128).long()
-        wp = m.dx.double()[widx]                        # [O,K]
-        xp = m.dw.double()[xidx]                        # [B,K,L]
+        wp = dxl[widx]                                  # [O,K]
+        xp = dwl[xidx]                                  # [B,K,L]
         gx_u = torch.einsum('ok,nol->nkl', wp, g_raw)
         gw = torch.einsum('nol,nkl->ok', g_raw, xp).view(O, C, kH, kW)
         # fold + fakequant STE
@@ -101,12 +109,13 @@ def fp64_grads(m, x, go):
         return gx, gw, g_bias
 
 
-def check(tag, B, C, H, W, O, k, s=1, p=0, d=1, bias=True, train=True):
+def check(tag, B, C, H, W, O, k, s=1, p=0, d=1, bias=True, train=True,
+          mode='lre'):
     global nfail
     lut = torch.randint(-127*127, 127*127, (256, 256), device=dev).float()
-    dx = torch.randn(256, device=dev)
-    dw = torch.randn(256, device=dev)
-    m = Conv2d_int8(C, O, k, lut, grad='lre', dx=dx, dw=dw, bias=bias,
+    dx = torch.randn(256, device=dev) if mode == 'lre' else None
+    dw = torch.randn(256, device=dev) if mode == 'lre' else None
+    m = Conv2d_int8(C, O, k, lut, grad=mode, dx=dx, dw=dw, bias=bias,
                     stride=s, padding=p, dilation=d).to(dev)
     m.train(train)
     m.update_scale = False
@@ -199,6 +208,17 @@ check('k3 s1 p1 batch1',         1, 16, 20, 20, 24, 3, 1, 1)
 check('k1 s1 p0 batch1',         1, 16, 20, 20, 24, 1, 1, 0)
 check('k3 s1 p1 H!=W',           4, 16, 24, 18, 24, 3, 1, 1)
 check('k3 s1 p1 cifar tiny',     16, 16, 32, 32, 16, 3, 1, 1)
+
+print('--- ste (identity-LUT lre) ---')
+check('ste k3 s1 p1 resnet block', 8, 64, 28, 28, 64, 3, 1, 1, mode='ste')
+check('ste k3 s2 p1 downsample',   8, 64, 28, 28, 128, 3, 2, 1, mode='ste')
+check('ste k1 s1 p0 bottleneck',   8, 64, 28, 28, 256, 1, 1, 0, mode='ste')
+check('ste k1 s2 p0 shortcut',     8, 64, 28, 28, 128, 1, 2, 0, mode='ste')
+check('ste k7 s2 p3 stem C=3',     4, 3, 64, 64, 32, 7, 2, 3, mode='ste')
+check('ste k3 s1 p2 d2 dilated',   4, 16, 20, 20, 24, 3, 1, 2, d=2, mode='ste')
+check('ste k3 s1 p1 no bias',      4, 16, 20, 20, 24, 3, 1, 1, bias=False, mode='ste')
+check('ste k3 s1 p1 batch1',       1, 16, 20, 20, 24, 3, 1, 1, mode='ste')
+check('ste k3 s1 p1 H!=W',         4, 16, 24, 18, 24, 3, 1, 1, mode='ste')
 
 # eval mode / no-grad forward still works and matches
 m = Conv2d_int8(16, 24, 3, torch.randint(-127*127, 127*127, (256, 256), device=dev).float(),

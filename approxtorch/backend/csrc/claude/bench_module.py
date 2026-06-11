@@ -22,7 +22,10 @@ def old_path(m, x):
     else:
         xu = F.unfold(xq, m.kernel_size, dilation=m.dilation,
                       padding=m.padding, stride=m.stride)
-    y = bgemm.bgemm_int8_lre(xu, w.view(O, -1), m.lut, m.dx, m.dw)
+    if m.grad == 'ste':
+        y = bgemm.bgemm_int8_ste(xu, w.view(O, -1), m.lut)
+    else:
+        y = bgemm.bgemm_int8_lre(xu, w.view(O, -1), m.lut, m.dx, m.dw)
     H, W = x.shape[2], x.shape[3]
     OH = (H + 2*m.padding[0] - m.dilation[0]*(kH-1) - 1)//m.stride[0] + 1
     OW = (W + 2*m.padding[1] - m.dilation[1]*(kW-1) - 1)//m.stride[1] + 1
@@ -54,11 +57,15 @@ lut = torch.randint(-127*127, 127*127, (256, 256), device=dev).float()
 dx = torch.randn(256, device=dev)
 dw = torch.randn(256, device=dev)
 
-print(f'{"shape":28s} {"old ms":>8s} {"new ms":>8s} {"speedup":>8s}'
+import sys
+mode = sys.argv[1] if len(sys.argv) > 1 else 'lre'
+
+print(f'{"shape ("+mode+")":28s} {"old ms":>8s} {"new ms":>8s} {"speedup":>8s}'
       f' {"old peak":>9s} {"new peak":>9s}')
 for (B, C, H, O, k, s, p) in shapes:
-    m = Conv2d_int8(C, O, k, lut, grad='lre', dx=dx, dw=dw, bias=True,
-                    stride=s, padding=p).to(dev)
+    kw = dict(dx=dx, dw=dw) if mode == 'lre' else {}
+    m = Conv2d_int8(C, O, k, lut, grad=mode, bias=True,
+                    stride=s, padding=p, **kw).to(dev)
     m.train()
     m.update_scale = False
     with torch.no_grad():
