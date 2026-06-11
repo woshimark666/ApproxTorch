@@ -370,3 +370,29 @@ grads 1e-7 vs grouped fp64 einsum truth, y bit-identical through the full
 fakequant chain. bench_dwconv.py: per-layer numbers + torchvision
 mobilenet_v2 with all 52 convs swapped (17 depthwise) trains: 71.6 ms/step,
 B=64 224^2, 4.0 GB peak.
+
+## independent-oracle verification round (2026-06-11)
+
+verify_correctness.py checks the conv paths against implementations we did
+not write (test_conv_decoupled's fp64 truth shares this author's reading of
+the semantics; these do not):
+  A. exact-product LUT ((i-128)(j-128)): module forward == plain
+     unfold+GEMM conv BITWISE, 18 configs (g1 + depthwise, ste + lre).
+  B. ste grads == torch-autograd F.conv2d surrogate grads (mostly exactly
+     0 deviation; 1x1 cuBLAS path 2.8e-7).
+  C. lre grads vs the ORIGINAL pre-claude bgemm_lre_backward op
+     (per-channel loop for depthwise): 1e-7..4.4e-7.
+  D. adversarial padding dw[128]=1e4 on padding-dominated geometry: 6e-8.
+  E. 30-config random geometry fuzz: clean.
+  F. int16-boundary LUT (+-32767), fp32 fallback (32768), channels_last and
+     storage-offset inputs: bitwise clean.
+  G. swapped MobileNetV2 (w0.35) overfits one batch: 2.36 -> 1e-4 in 150
+     steps, both modes.
+
+Important oracle lesson: F.conv2d is NOT bitwise-exact on integer inputs —
+cuDNN may pick Winograd/FFT (hit on k5 s2: 0.0625 abs deviation from the
+true integer sum). Plain sums in fp32 are exact below 2^24 under ANY
+reduction order, transform-based algorithms are not sums. Bitwise oracles
+must use unfold+matmul (cuBLAS). The fuzz failure that exposed this was in
+the oracle, not in the kernels (module output matched the tap-ordered
+reference exactly).
