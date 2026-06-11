@@ -146,6 +146,21 @@ def lut_map_pad(x: Tensor, lut: Tensor, padding) -> Tensor:
     return torch.ops.approxtorch.lut_map_pad.default(x, lut, ph, pw)
 
 
+# depthwise approximate-mult conv forward (groups == C, channel multiplier 1):
+# x quantized image [N,C,H,W] (int8/uint8/float), w fp32 [C, kh*kw] quantized
+# values. Returns (y [N,C,OH,OW] fp32, wq [C, kh*kw] u8 LUT indices). y is
+# bit-identical to running the LUT-BGEMM per channel (same tap order).
+def dwconv_fake_int8_claude(x: Tensor, w: Tensor, lut: Tensor,
+                            kernel_size, stride=1, padding=0,
+                            dilation=1) -> tuple[Tensor, Tensor]:
+    kh, kw = _pair(kernel_size)
+    sh, sw = _pair(stride)
+    ph, pw = _pair(padding)
+    dilh, dilw = _pair(dilation)
+    return torch.ops.approxtorch.dwconv_fake_int8_claude.default(
+        x, w, lut, kh, kw, sh, sw, ph, pw, dilh, dilw)
+
+
 # implicit-im2col variant: x is the PRE-unfold quantized image [N,C,H,W]
 # (int8/uint8/float); im2col indices are computed on the fly inside the
 # X' build kernel, the unfolded tensor is never materialized

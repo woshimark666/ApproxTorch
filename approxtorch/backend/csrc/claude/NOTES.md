@@ -334,3 +334,39 @@ Whole step 1.02-3.1x (B64 C64 56^2: 2.2x, peak 1537 -> 273 MB; CIFAR:
 because the old einsum path was unoptimized there. Same test matrix as
 lre: y bit-identical, grads 1e-7 rel vs the fp64 einsum-formula truth.
 bqsg64 is the only remaining unfold user in the module.
+
+## depthwise conv (MobileNetV2) — dwconv_claude.cu (2026-06-11)
+
+groups support in Conv2d_int8_decoupled: 1 or depthwise (groups == in ==
+out, channel multiplier 1 — the only two cases MobileNetV2 uses; its
+depthwise hidden dims are 32..960).
+
+Forward: with groups == C the im2col GEMM degenerates (K = 9, O = 1 per
+group), so `dwconv_fake_int8_claude` is a dedicated kernel. Key idea: a
+warp's lanes share the channel => same weight index, different x index, so
+gathering from the TRANSPOSED table lutT[w][x] (same prepare pass as the
+SFLAT bgemm path, int16 image + grid-uniform validity flag) keeps every
+gather inside one LUT row; the per-channel hot set is kh*kw rows and stays
+L1-resident. 3x3 is a template specialization (taps unrolled, weight rows
+in registers); generic-k fallback re-reads wq via __ldg. Tap order is
+ascending (i,j) row-major == per-group GEMM order => y BIT-IDENTICAL to
+running the LUT-BGEMM per channel; out-of-bounds taps contribute
+lut[128][w] (the im2col zero-padding semantics), NOT zero. Returns
+(y [N,C,OH,OW], wq u8) like the bgemm _save contract. Measured at parity
+with cuDNN fp32 depthwise F.conv2d on MobileNet shapes (0.26 vs 0.27 ms on
+C32 112^2 B64; slightly slower only on tiny 7x7/14x14 layers — fixed
+launch overhead of 3 kernels incl. the per-call lutT prep).
+
+Backward: nearly free — cuDNN convolution_backward takes groups natively
+and the LRE factorization is per-channel, so both Functions just thread
+`groups` through geom (5-tuple now); lut_map/lut_map_pad are elementwise
+and unaffected; the 1x1 cuBLAS fast path is gated to groups == 1. Module
+weight is [O, C/groups, kH, kW] (watch the forward unpack — weight.shape[1]
+is NOT in_channels for depthwise).
+
+Tests: op bit-exact vs a tap-ordered python reference (7 geometries incl.
+k5 generic path, dilation, fp32-LUT fallback, C=960); module-level lre+ste
+grads 1e-7 vs grouped fp64 einsum truth, y bit-identical through the full
+fakequant chain. bench_dwconv.py: per-layer numbers + torchvision
+mobilenet_v2 with all 52 convs swapped (17 depthwise) trains: 71.6 ms/step,
+B=64 224^2, 4.0 GB peak.

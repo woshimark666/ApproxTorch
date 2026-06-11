@@ -25,6 +25,8 @@ cuda_functions = CUDAExtension('approxtorch.backend._C',[
         './approxtorch/backend/csrc/claude/bgemm_lre_backward_claude.cu',
         # claude-optimized fused fake-quant (op: fakequant_per_tensor_claude)
         './approxtorch/backend/csrc/claude/fakequant_claude.cu',
+        # claude depthwise LUT conv forward (op: dwconv_fake_int8_claude)
+        './approxtorch/backend/csrc/claude/dwconv_claude.cu',
         './approxtorch/backend/csrc/cuda/bgemm_bqsg64_backward.cu',
         './approxtorch/backend/csrc/cuda/elementwise_mul.cu',
     ],                   

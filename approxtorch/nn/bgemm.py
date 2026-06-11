@@ -71,13 +71,23 @@ class _conv2d_int8_lre(Function):
     # 后是 dw[128] != 0 而 cuDNN 只会补 0，所以 weight pass 用 lut_map_pad 把
     # dw[128] 预先填进边界、以 padding=0 调用；data pass 与 padding 无关。
     # 1x1/stride1/无 padding 时 cuDNN 反而更慢（实测 0.82x），保留 cuBLAS 路径。
+    #
+    # groups: 支持 1（普通卷积，forward 走 im2col_u8 + bgemm）和 depthwise
+    # （groups == C == O，forward 走专用 dwconv kernel）。backward 两种情况
+    # 同一套代码：cuDNN 的 convolution_backward 原生支持 groups，LRE 的
+    # 因式分解按通道独立成立。
 
     @staticmethod
     def forward(ctx, x, w, lut, dx, dw, geom):
-        kernel_size, stride, padding, dilation = geom
+        kernel_size, stride, padding, dilation, groups = geom
         xq8 = x.detach().to(torch.int8)
-        xu8 = at.backend.ops.im2col_u8(xq8, kernel_size, stride, padding, dilation)
-        y, _, wq = at.backend.ops.bgemm_fake_int8_claude_save(xu8, w, lut)
+        if groups == 1:
+            xu8 = at.backend.ops.im2col_u8(xq8, kernel_size, stride, padding, dilation)
+            y, _, wq = at.backend.ops.bgemm_fake_int8_claude_save(xu8, w, lut)
+        else:
+            # depthwise：y 与逐通道跑 LUT-BGEMM 逐位一致（同 tap 顺序）
+            y, wq = at.backend.ops.dwconv_fake_int8_claude(
+                xq8, w, lut, kernel_size, stride, padding, dilation)
         ctx.save_for_backward(xq8, wq)
         ctx.geom = geom
         ctx.dx = dx
@@ -87,12 +97,12 @@ class _conv2d_int8_lre(Function):
     @staticmethod
     def backward(ctx, grad_outputs):
         xq8, wq = ctx.saved_tensors
-        (kh, kw), (sh, sw), (ph, pw), (dilh, dilw) = ctx.geom
+        (kh, kw), (sh, sw), (ph, pw), (dilh, dilw), g = ctx.geom
         dx, dw = ctx.dx, ctx.dw
         B, C, H, W = xq8.shape
         O = wq.shape[0]
 
-        if (kh, kw, sh, sw, ph, pw, dilh, dilw) == (1, 1, 1, 1, 0, 0, 1, 1):
+        if g == 1 and (kh, kw, sh, sw, ph, pw, dilh, dilw) == (1, 1, 1, 1, 0, 0, 1, 1):
             # 1x1：图像本身就是展开矩阵
             grad_x, grad_w = at.backend.ops.bgemm_lre_backward_claude(
                 grad_output=grad_outputs, x=xq8.flatten(2),
@@ -104,7 +114,7 @@ class _conv2d_int8_lre(Function):
         OH = (H + 2 * ph - dilh * (kh - 1) - 1) // sh + 1
         OW = (W + 2 * pw - dilw * (kw - 1) - 1) // sw + 1
         go = grad_outputs.reshape(B, O, OH, OW)
-        wp = at.backend.ops.lut_map(wq, dx).view(O, C, kh, kw)
+        wp = at.backend.ops.lut_map(wq, dx).view(O, C // g, kh, kw)
         xp = at.backend.ops.lut_map_pad(xq8, dw, (ph, pw))
 
         # 与 cuBLAS 路径同精度（torch 对 conv 默认开 TF32，会悄悄降梯度精度）；
@@ -117,17 +127,17 @@ class _conv2d_int8_lre(Function):
             if ph == 0 and pw == 0:
                 grad_x, grad_w, _ = torch.ops.aten.convolution_backward(
                     go, xp, wp, None, [sh, sw], [0, 0], [dilh, dilw],
-                    False, [0, 0], 1, [True, True, False])
+                    False, [0, 0], g, [True, True, False])
             else:
                 # data pass 用原 padding 几何（input 只取形状，零存储 expand）
                 dummy_x = go.new_empty(1).expand(B, C, H, W)
                 grad_x, _, _ = torch.ops.aten.convolution_backward(
                     go, dummy_x, wp, None, [sh, sw], [ph, pw], [dilh, dilw],
-                    False, [0, 0], 1, [True, False, False])
-                dummy_w = go.new_empty(1).expand(O, C, kh, kw)
+                    False, [0, 0], g, [True, False, False])
+                dummy_w = go.new_empty(1).expand(O, C // g, kh, kw)
                 _, grad_w, _ = torch.ops.aten.convolution_backward(
                     go, xp, dummy_w, None, [sh, sw], [0, 0], [dilh, dilw],
-                    False, [0, 0], 1, [False, True, False])
+                    False, [0, 0], g, [False, True, False])
         finally:
             torch.backends.cudnn.allow_tf32 = prev_tf32
             torch.backends.cudnn.benchmark = prev_bench
@@ -165,10 +175,15 @@ class _conv2d_int8_ste(Function):
 
     @staticmethod
     def forward(ctx, x, w, lut, geom):
-        kernel_size, stride, padding, dilation = geom
+        kernel_size, stride, padding, dilation, groups = geom
         xq8 = x.detach().to(torch.int8)
-        xu8 = at.backend.ops.im2col_u8(xq8, kernel_size, stride, padding, dilation)
-        y, _, wq = at.backend.ops.bgemm_fake_int8_claude_save(xu8, w, lut)
+        if groups == 1:
+            xu8 = at.backend.ops.im2col_u8(xq8, kernel_size, stride, padding, dilation)
+            y, _, wq = at.backend.ops.bgemm_fake_int8_claude_save(xu8, w, lut)
+        else:
+            # depthwise（groups == C == O）：专用 LUT kernel
+            y, wq = at.backend.ops.dwconv_fake_int8_claude(
+                xq8, w, lut, kernel_size, stride, padding, dilation)
         ctx.save_for_backward(xq8, wq)
         ctx.geom = geom
         return y
@@ -176,11 +191,11 @@ class _conv2d_int8_ste(Function):
     @staticmethod
     def backward(ctx, grad_outputs):
         xq8, wq = ctx.saved_tensors
-        (kh, kw), (sh, sw), (ph, pw), (dilh, dilw) = ctx.geom
+        (kh, kw), (sh, sw), (ph, pw), (dilh, dilw), g = ctx.geom
         B, C, H, W = xq8.shape
         O = wq.shape[0]
 
-        if (kh, kw, sh, sw, ph, pw, dilh, dilw) == (1, 1, 1, 1, 0, 0, 1, 1):
+        if g == 1 and (kh, kw, sh, sw, ph, pw, dilh, dilw) == (1, 1, 1, 1, 0, 0, 1, 1):
             # 1x1：图像本身就是展开矩阵，cuBLAS op 比 cuDNN 快（实测 0.82x）。
             # op 内部先按解码表还原数值、再做的两个 GEMM 就是上面的 einsum 对
             dec = _u8_decode_table(xq8.device)
@@ -193,8 +208,8 @@ class _conv2d_int8_ste(Function):
         OH = (H + 2 * ph - dilh * (kh - 1) - 1) // sh + 1
         OW = (W + 2 * pw - dilw * (kw - 1) - 1) // sw + 1
         go = grad_outputs.reshape(B, O, OH, OW)
-        xf = xq8.float()                                  # 量化值，精确整数
-        wf = (wq.float() - 128.0).view(O, C, kh, kw)      # u8 索引 -> 量化值
+        xf = xq8.float()                                    # 量化值，精确整数
+        wf = (wq.float() - 128.0).view(O, C // g, kh, kw)   # u8 索引 -> 量化值
 
         # 与 cuBLAS 同精度（torch 对 conv 默认开 TF32，会悄悄降梯度精度）；
         # 训练中形状固定，benchmark 让 cuDNN 选最优算法
@@ -205,7 +220,7 @@ class _conv2d_int8_ste(Function):
         try:
             grad_x, grad_w, _ = torch.ops.aten.convolution_backward(
                 go, xf, wf, None, [sh, sw], [ph, pw], [dilh, dilw],
-                False, [0, 0], 1, [True, True, False])
+                False, [0, 0], g, [True, True, False])
         finally:
             torch.backends.cudnn.allow_tf32 = prev_tf32
             torch.backends.cudnn.benchmark = prev_bench

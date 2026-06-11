@@ -36,9 +36,15 @@ class Conv2d_int8(nn.Module):
         self.stride = _pair(stride)
         self.padding = _pair(padding)
         self.dilation = _pair(dilation)
-        if groups != 1:
-            raise NotImplementedError("Conv2d_int8_decoupled only supports groups=1, "
-                                      f"got groups={groups}")
+        # groups: 1（普通卷积）或 depthwise（groups == in == out，即通道
+        # multiplier 为 1，MobileNet 系列的用法）；其余分组暂不支持
+        if groups != 1 and not (groups == in_channels and out_channels == in_channels):
+            raise NotImplementedError(
+                "Conv2d_int8_decoupled supports groups=1 or depthwise "
+                f"(groups == in_channels == out_channels), got groups={groups}, "
+                f"in={in_channels}, out={out_channels}")
+        if groups != 1 and grad == 'bqsg64':
+            raise NotImplementedError("depthwise is not implemented for bqsg64")
         self.groups = groups
         self.x_quantizer = x_quantizer
         self.w_quantizer = w_quantizer
@@ -51,8 +57,10 @@ class Conv2d_int8(nn.Module):
         
         # lut 
         self.register_buffer('lut', lut)
-        # weight
-        self.weight = nn.Parameter(torch.empty(self.out_channels, self.in_channels, self.kernel_size[0], self.kernel_size[1]))
+        # weight（depthwise 时 [O, 1, kH, kW]，与 nn.Conv2d 一致）
+        self.weight = nn.Parameter(torch.empty(self.out_channels,
+                                               self.in_channels // self.groups,
+                                               self.kernel_size[0], self.kernel_size[1]))
         # quantization parameters
         match x_quantizer:
             case 'symmetric':
@@ -94,7 +102,8 @@ class Conv2d_int8(nn.Module):
         # 与 nn.Conv2d 相同的默认初始化
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
         if self.bias is not None:
-            fan_in = self.in_channels * self.kernel_size[0] * self.kernel_size[1]
+            fan_in = (self.in_channels // self.groups) \
+                     * self.kernel_size[0] * self.kernel_size[1]
             bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
             nn.init.uniform_(self.bias, -bound, bound)
 
@@ -124,9 +133,9 @@ class Conv2d_int8(nn.Module):
 
     def forward(self, x: torch.Tensor):
 
-        # 0. compute output shape 
+        # 0. compute output shape
         B, C, H, W = x.shape
-        O, C, kH, kW = self.weight.shape
+        O, _, kH, kW = self.weight.shape   # weight [O, C//groups, kH, kW]
         kernel_size = (kH, kW)
         sH, sW = self.stride
         pH, pW = self.padding
@@ -146,9 +155,10 @@ class Conv2d_int8(nn.Module):
         if self.grad in ('lre', 'ste'):
             # conv 级 Function：内部 int8 图像 -> im2col_u8 直接喂 LUT kernel
             # （fp32 unfold 和 kernel 的 fp32->u8 prepass 都不再发生），
-            # backward 对 k!=1 走 cuDNN 等价卷积、直接返回图像空间梯度。
-            # ste 的反传 = 普通卷积反传（einsum 对的卷积形式），见 bgemm.py
-            geom = (kernel_size, self.stride, self.padding, self.dilation)
+            # depthwise（groups==C）则走专用 dwconv LUT kernel；
+            # backward 对 k!=1 走 cuDNN 等价卷积（原生支持 groups）、直接返回
+            # 图像空间梯度。ste 的反传 = 普通卷积反传，见 bgemm.py
+            geom = (kernel_size, self.stride, self.padding, self.dilation, self.groups)
             if self.grad == 'lre':
                 y = bgemm.conv2d_int8_lre(
                     x, w.view(self.out_channels, -1), self.lut, self.dx, self.dw, geom)
