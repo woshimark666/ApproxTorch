@@ -26,7 +26,8 @@ class Conv2d_int8(nn.Module):
                  groups: int = 1,
                  update_scale: bool = True,
                  scale_momentum: float = 0.05,
-                 weight_bits: int = 8
+                 weight_bits: int = 8,
+                 trunc_bits: int = 0
          ):
         
         super().__init__()
@@ -52,6 +53,9 @@ class Conv2d_int8(nn.Module):
         self.qmin = -127
         self.qmax = 127
         self.weight_bits = weight_bits
+        # 近似乘法器对「权重操作数」（LUT 第二/列操作数）截断的低位数 n。
+        # 0 = 普通逐点量化；n>0 时把权重量化到 2^n 的有效格点，使硬件截断成 no-op。
+        self.trunc_bits = trunc_bits
         self.scale_momentum = scale_momentum
         self.update_scale = update_scale  # whether to update scale during training, used for BatchNorm fusion
         
@@ -149,7 +153,7 @@ class Conv2d_int8(nn.Module):
             self._update_scale(x)
 
         x = fakequant.symmetric_static_quantize_int8_per_tensor(x, self.scale_x, None, self.qmin, self.qmax)
-        w, s_w = fakequant.symmetric_dynamic_quantize_int8_per_channel(self.weight, ch_axis=0, bits=self.weight_bits)
+        w, s_w = fakequant.symmetric_dynamic_quantize_int8_per_channel(self.weight, ch_axis=0, bits=self.weight_bits, trunc_bits=self.trunc_bits)
 
         # 2. + 3. im2col + bgemm
         if self.grad in ('lre', 'ste'):

@@ -20,7 +20,8 @@ def to_qat_int8(
         ignore_first_conv: bool = True,
         scale_momentum: float = 0.05,
         decoupled: bool = False,
-        weight_bits: int = 8
+        weight_bits: int = 8,
+        trunc_bits: int = 0   # n: 近似乘法器截断权重操作数的低位数（0=off，仅 decoupled 路径生效）
         ):
     
     modules_to_replace = []
@@ -79,7 +80,8 @@ def to_qat_int8(
                         groups = groups,
                         update_scale = True,
                         scale_momentum = scale_momentum,
-                        weight_bits = weight_bits
+                        weight_bits = weight_bits,
+                        trunc_bits = trunc_bits
                 )
 
                 else:     
