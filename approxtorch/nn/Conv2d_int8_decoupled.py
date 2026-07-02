@@ -27,7 +27,8 @@ class Conv2d_int8(nn.Module):
                  update_scale: bool = True,
                  scale_momentum: float = 0.05,
                  weight_bits: int = 8,
-                 trunc_bits: int = 0
+                 trunc_bits: int = 0,
+                 w_scale_mode: str = 'dynamic'
          ):
         
         super().__init__()
@@ -56,6 +57,14 @@ class Conv2d_int8(nn.Module):
         # 近似乘法器对「权重操作数」（LUT 第二/列操作数）截断的低位数 n。
         # 0 = 普通逐点量化；n>0 时把权重量化到 2^n 的有效格点，使硬件截断成 no-op。
         self.trunc_bits = trunc_bits
+        # 权重 scale 的获取方式：
+        #   'dynamic': 每步 per-channel absmax（原行为）
+        #   'ema':     静态 scale_w buffer（calib.py 校准值直接加载）+ 训练中 EMA 更新。
+        #              粗格点（trunc_bits 大、有效档位少）下 absmax 每步漂移会让阈值附近
+        #              的权重批量翻档，训练震荡；EMA 把标尺和当步 absmax 解耦。
+        if w_scale_mode not in ('dynamic', 'ema'):
+            raise ValueError(f"w_scale_mode must be 'dynamic' or 'ema', got {w_scale_mode}")
+        self.w_scale_mode = w_scale_mode
         self.scale_momentum = scale_momentum
         self.update_scale = update_scale  # whether to update scale during training, used for BatchNorm fusion
         
@@ -74,7 +83,14 @@ class Conv2d_int8(nn.Module):
                 raise NotImplementedError("asymmetric quantization for x is not implemented yet")
             case _:
                 raise ValueError("Invalid quantization method for x")
-        
+
+        # 静态权重 scale（仅 'ema' 模式）：语义与 calib.py 的 scale_w 一致
+        # （absmax/qmax 的传统 dequant scale，per-channel [O]），因此校准
+        # checkpoint 里的 {layer}.scale_w 可以直接 load_state_dict 进来。
+        # forward 里由 fakequant 换算成有效格点 scale s_eff = scale_w*qmax/Qeff。
+        if self.w_scale_mode == 'ema':
+            self.register_buffer('scale_w', torch.ones(self.out_channels))
+
 
         # bias
         if isinstance(bias, torch.Tensor) or bias == True:
@@ -85,6 +101,15 @@ class Conv2d_int8(nn.Module):
             raise ValueError("Invalid bias type")
 
         self.reset_parameters()
+
+        # 'ema' 模式下用当前权重的 per-channel absmax 给 scale_w 一个合理初值
+        # （独立使用时不至于从 1.0 慢慢爬）；随后 load_state_dict 会用校准值覆盖。
+        if self.w_scale_mode == 'ema':
+            with torch.no_grad():
+                qmax_w = 2 ** (self.weight_bits - 1) - 1
+                absmax = self.weight.detach().abs().amax(dim=(1, 2, 3))
+                self.scale_w.copy_(torch.where(absmax > 0, absmax / qmax_w,
+                                               torch.ones_like(absmax)))
 
         # 外部给定 bias 时覆盖默认初始化
         if isinstance(bias, torch.Tensor):
@@ -114,7 +139,8 @@ class Conv2d_int8(nn.Module):
     def __repr__(self):
         return f"Conv2d_int8_decoupled(in_channels={self.in_channels}, out_channels={self.out_channels}, kernel_size={self.kernel_size}, "\
                 f"stride={self.stride}, padding={self.padding}, dilation={self.dilation}, groups={self.groups}, " \
-                f"x_quantizer={self.x_quantizer}, w_quantizer={self.w_quantizer}, grad={self.grad})"
+                f"x_quantizer={self.x_quantizer}, w_quantizer={self.w_quantizer}, grad={self.grad}, " \
+                f"weight_bits={self.weight_bits}, trunc_bits={self.trunc_bits}, w_scale_mode={self.w_scale_mode})"
     
 
     def unfreeze_scale(self):
@@ -132,6 +158,18 @@ class Conv2d_int8(nn.Module):
             current_scale = abs_max / ((self.qmax - self.qmin) / 2 )
             new_scale = self.scale_momentum * current_scale + (1 - self.scale_momentum) * self.scale_x
             self.scale_x.copy_(new_scale)
+
+    def _update_scale_w(self):
+        # 权重 scale 的 EMA（仅 'ema' 模式）。与 _update_scale 同一 momentum 约定。
+        # DDP 下权重本身在各 rank 逐位一致，absmax 自然一致，无需 all_reduce。
+        with torch.no_grad():
+            qmax_w = 2 ** (self.weight_bits - 1) - 1
+            reduce_dims = tuple(range(1, self.weight.dim()))
+            absmax = self.weight.detach().abs().amax(dim=reduce_dims)   # [O]
+            current_scale = torch.where(absmax > 0, absmax / qmax_w,
+                                        self.scale_w)
+            new_scale = self.scale_momentum * current_scale + (1 - self.scale_momentum) * self.scale_w
+            self.scale_w.copy_(new_scale)
 
 
 
@@ -151,9 +189,17 @@ class Conv2d_int8(nn.Module):
         #   check if we need to update scale:
         if self.training and self.update_scale:
             self._update_scale(x)
+            if self.w_scale_mode == 'ema':
+                self._update_scale_w()
 
         x = fakequant.symmetric_static_quantize_int8_per_tensor(x, self.scale_x, None, self.qmin, self.qmax)
-        w, s_w = fakequant.symmetric_dynamic_quantize_int8_per_channel(self.weight, ch_axis=0, bits=self.weight_bits, trunc_bits=self.trunc_bits)
+        if self.w_scale_mode == 'ema':
+            # 静态格点量化：标尺来自校准 + EMA，与当步 absmax 解耦
+            w, s_w = fakequant.symmetric_static_quantize_int8_per_channel_grid(
+                self.weight, self.scale_w, ch_axis=0,
+                bits=self.weight_bits, trunc_bits=self.trunc_bits)
+        else:
+            w, s_w = fakequant.symmetric_dynamic_quantize_int8_per_channel(self.weight, ch_axis=0, bits=self.weight_bits, trunc_bits=self.trunc_bits)
 
         # 2. + 3. im2col + bgemm
         if self.grad in ('lre', 'ste'):

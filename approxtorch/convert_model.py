@@ -21,7 +21,8 @@ def to_qat_int8(
         scale_momentum: float = 0.05,
         decoupled: bool = False,
         weight_bits: int = 8,
-        trunc_bits: int = 0   # n: 近似乘法器截断权重操作数的低位数（0=off，仅 decoupled 路径生效）
+        trunc_bits: int = 0,  # n: 近似乘法器截断权重操作数的低位数（0=off，仅 decoupled 路径生效）
+        w_scale_mode: str = 'dynamic'  # 权重 scale: 'dynamic'=每步 absmax / 'ema'=校准+EMA（仅 decoupled）
         ):
     
     modules_to_replace = []
@@ -81,7 +82,8 @@ def to_qat_int8(
                         update_scale = True,
                         scale_momentum = scale_momentum,
                         weight_bits = weight_bits,
-                        trunc_bits = trunc_bits
+                        trunc_bits = trunc_bits,
+                        w_scale_mode = w_scale_mode
                 )
 
                 else:     

@@ -186,3 +186,42 @@ def symmetric_dynamic_quantize_int8_per_channel(x, ch_axis=1, bits=8, trunc_bits
     q = k * B
 
     return q, scale
+
+
+def symmetric_static_quantize_int8_per_channel_grid(x, scale, ch_axis=0, bits=8, trunc_bits=0):
+    """
+    静态版 effective-grid 量化：scale 由外部给定（校准初始化 + 训练中 EMA），
+    不再由当步 absmax 决定 —— 解决动态 absmax × 粗格点的阈值漂移/自指反馈问题。
+
+    scale 语义 = 「传统」dequant scale（absmax/qmax 风格，即 calib.py 存的 scale_w），
+    这样校准 checkpoint 可以直接加载。内部换算成有效格点 scale：
+
+        qmax  = 2^(bits-1) - 1
+        B     = 2^trunc_bits,  K = floor(qmax / B),  Qeff = B*K
+        s_eff = scale * qmax / Qeff        # trunc_bits=0 时 Qeff=qmax，s_eff=scale
+        k     = clip(round(x / (s_eff*B)), -K, K)
+        q     = B * k                      # T_n(q) = q，硬件截断为 no-op
+
+    落在 [-Qeff*s_eff, Qeff*s_eff] 之外的权重被 clip，STE 反传时梯度被 mask 置零
+    （与静态激活量化同一行为）。
+
+    return:
+        q:     quantized tensor（B 的倍数整数，float dtype）
+        s_eff: 有效 dequant scale，shape 同 scale，调用方用它反量化
+    """
+    assert 3 <= bits <= 8, f"bits must be between 3 and 8, got {bits}"
+    assert trunc_bits >= 0, f"trunc_bits must be >= 0, got {trunc_bits}"
+
+    qmax = 2 ** (bits - 1) - 1
+    B = 1 << trunc_bits
+    K = qmax // B
+    assert K >= 1, (
+        f"trunc_bits={trunc_bits} too large for bits={bits}: "
+        f"B=2^{trunc_bits}={B} > qmax={qmax}, no effective level left")
+
+    s_eff = scale * (qmax / (B * K))
+    scale_inner = s_eff * B
+    k = _symmetric_static_quantize_int8_per_channel.apply(x, scale_inner, ch_axis, -K, K)
+    q = k * B
+
+    return q, s_eff
