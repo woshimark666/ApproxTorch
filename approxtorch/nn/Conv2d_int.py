@@ -1,7 +1,7 @@
 import math
 import torch
 import torch.distributed as dist
-from . import fakequant
+from . import quantization
 import approxtorch as at
 import torch.nn as nn
 from torch.nn.modules.utils import _pair
@@ -42,7 +42,7 @@ class Conv2d_int8(nn.Module):
         # multiplier 为 1，MobileNet 系列的用法）；其余分组暂不支持
         if groups != 1 and not (groups == in_channels and out_channels == in_channels):
             raise NotImplementedError(
-                "Conv2d_int8_decoupled supports groups=1 or depthwise "
+                "Conv2d_int8 supports groups=1 or depthwise "
                 f"(groups == in_channels == out_channels), got groups={groups}, "
                 f"in={in_channels}, out={out_channels}")
         if groups != 1 and grad == 'bqsg64':
@@ -137,7 +137,7 @@ class Conv2d_int8(nn.Module):
             nn.init.uniform_(self.bias, -bound, bound)
 
     def __repr__(self):
-        return f"Conv2d_int8_decoupled(in_channels={self.in_channels}, out_channels={self.out_channels}, kernel_size={self.kernel_size}, "\
+        return f"Conv2d_int8(in_channels={self.in_channels}, out_channels={self.out_channels}, kernel_size={self.kernel_size}, "\
                 f"stride={self.stride}, padding={self.padding}, dilation={self.dilation}, groups={self.groups}, " \
                 f"x_quantizer={self.x_quantizer}, w_quantizer={self.w_quantizer}, grad={self.grad}, " \
                 f"weight_bits={self.weight_bits}, trunc_bits={self.trunc_bits}, w_scale_mode={self.w_scale_mode})"
@@ -192,14 +192,14 @@ class Conv2d_int8(nn.Module):
             if self.w_scale_mode == 'ema':
                 self._update_scale_w()
 
-        x = fakequant.symmetric_static_quantize_int8_per_tensor(x, self.scale_x, None, self.qmin, self.qmax)
+        x = quantization.static_quantize_int8(x, self.scale_x, self.qmin, self.qmax)
         if self.w_scale_mode == 'ema':
             # 静态格点量化：标尺来自校准 + EMA，与当步 absmax 解耦
-            w, s_w = fakequant.symmetric_static_quantize_int8_per_channel_grid(
+            w, s_w = quantization.static_quantize_int8_grid(
                 self.weight, self.scale_w, ch_axis=0,
                 bits=self.weight_bits, trunc_bits=self.trunc_bits)
         else:
-            w, s_w = fakequant.symmetric_dynamic_quantize_int8_per_channel(self.weight, ch_axis=0, bits=self.weight_bits, trunc_bits=self.trunc_bits)
+            w, s_w = quantization.dynamic_quantize_int8(self.weight, ch_axis=0, bits=self.weight_bits, trunc_bits=self.trunc_bits)
 
         # 2. + 3. im2col + bgemm
         if self.grad in ('lre', 'ste'):

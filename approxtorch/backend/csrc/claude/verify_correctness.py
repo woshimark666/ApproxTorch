@@ -20,8 +20,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import approxtorch as at
-from approxtorch.nn import fakequant, bgemm
-from approxtorch.nn.Conv2d_int8_decoupled import Conv2d_int8
+from approxtorch.nn import quantization, bgemm
+from approxtorch.nn.Conv2d_int import Conv2d_int8
 
 torch.manual_seed(0)
 dev = 'cuda'
@@ -64,9 +64,9 @@ def make_module(C, O, k, s, p, d, g, mode, lut, dx=None, dw=None, bias=True):
 # quantized tensors exactly as the module computes them (python chain is
 # bit-identical to the fused kernels -- established in earlier rounds)
 def chain(m, x):
-    xq = fakequant.symmetric_static_quantize_int8_per_tensor(
-        x, m.scale_x, None, m.qmin, m.qmax)
-    wq, s_w = fakequant.symmetric_dynamic_quantize_int8_per_channel(
+    xq = quantization.static_quantize_int8(
+        x, m.scale_x, m.qmin, m.qmax)
+    wq, s_w = quantization.dynamic_quantize_int8(
         m.weight, ch_axis=0, bits=m.weight_bits)
     return xq, wq, s_w
 

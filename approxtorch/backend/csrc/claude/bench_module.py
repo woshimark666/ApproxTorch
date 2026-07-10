@@ -3,8 +3,8 @@
 # tensors. Reports step time (fwd+bwd) and forward memory.
 import torch
 import torch.nn.functional as F
-from approxtorch.nn import fakequant, bgemm
-from approxtorch.nn.Conv2d_int8_decoupled import Conv2d_int8
+from approxtorch.nn import quantization, bgemm
+from approxtorch.nn.Conv2d_int import Conv2d_int8
 
 torch.manual_seed(0)
 dev = 'cuda'
@@ -13,9 +13,9 @@ dev = 'cuda'
 def old_path(m, x):
     B = x.shape[0]
     O, C, kH, kW = m.weight.shape
-    xq = fakequant.symmetric_static_quantize_int8_per_tensor(
-        x, m.scale_x, None, m.qmin, m.qmax)
-    w, s_w = fakequant.symmetric_dynamic_quantize_int8_per_channel(
+    xq = quantization.static_quantize_int8(
+        x, m.scale_x, m.qmin, m.qmax)
+    w, s_w = quantization.dynamic_quantize_int8(
         m.weight, ch_axis=0, bits=m.weight_bits)
     if m.kernel_size == (1, 1) and m.padding == (0, 0) and m.stride == (1, 1):
         xu = xq.flatten(2)

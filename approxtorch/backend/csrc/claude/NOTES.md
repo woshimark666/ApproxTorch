@@ -255,7 +255,7 @@ The cfg hook note: with the refactor, cfg=1 for N==1 keeps the
 transpose+single-gemm route via allow_direct_n1=false; auto N==1 uses
 the direct batch-1 GEMM as before.
 
-## fakequant_claude.cu — fused per-tensor fake-quant (plan C, 2026-06-10)
+## quantization.cu (原 fakequant_claude.cu) — fused per-tensor fake-quant (plan C, 2026-06-10)
 
 `fakequant_per_tensor_claude(x, scale, qmin, qmax) -> (q, mask)` and
 `fakequant_per_tensor_backward_claude(go, mask, scale) -> gx`. The

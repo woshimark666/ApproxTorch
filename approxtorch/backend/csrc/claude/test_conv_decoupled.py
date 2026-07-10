@@ -12,8 +12,8 @@ import torch
 import torch.nn.functional as F
 from torch.autograd import Function
 import approxtorch as at
-from approxtorch.nn import fakequant, bgemm
-from approxtorch.nn.Conv2d_int8_decoupled import Conv2d_int8
+from approxtorch.nn import quantization, bgemm
+from approxtorch.nn.Conv2d_int import Conv2d_int8
 
 torch.manual_seed(0)
 dev = 'cuda'
@@ -31,9 +31,9 @@ def relerr(a, b):
 def old_path(m, x):
     B = x.shape[0]
     O, C, kH, kW = m.weight.shape
-    xq = fakequant.symmetric_static_quantize_int8_per_tensor(
-        x, m.scale_x, None, m.qmin, m.qmax)
-    w, s_w = fakequant.symmetric_dynamic_quantize_int8_per_channel(
+    xq = quantization.static_quantize_int8(
+        x, m.scale_x, m.qmin, m.qmax)
+    w, s_w = quantization.dynamic_quantize_int8(
         m.weight, ch_axis=0, bits=m.weight_bits)
     xu = F.unfold(xq, m.kernel_size, dilation=m.dilation,
                   padding=m.padding, stride=m.stride)
@@ -326,9 +326,9 @@ def check_dw(tag, B, C, H, W, k, s=1, p=0, d=1, bias=True, mode='lre'):
 
     # forward reference through the same python fakequant chain
     with torch.no_grad():
-        xqr = fakequant.symmetric_static_quantize_int8_per_tensor(
-            x0, m.scale_x, None, m.qmin, m.qmax)
-        wr, s_wr = fakequant.symmetric_dynamic_quantize_int8_per_channel(
+        xqr = quantization.static_quantize_int8(
+            x0, m.scale_x, m.qmin, m.qmax)
+        wr, s_wr = quantization.dynamic_quantize_int8(
             m.weight, ch_axis=0, bits=m.weight_bits)
         yr = dw_ref_y(xqr, wr.view(C, -1), m.lut, m.kernel_size,
                       m.stride, m.padding, m.dilation)
