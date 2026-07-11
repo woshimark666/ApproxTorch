@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 # 旧实现（Conv2d_uint8 / 旧 Conv2d_int8 / gradual / BQSG64_float）已移入
 # approxtorch/nn/deprecated/，不再可从包导入；本文件只保留 decoupled 路径。
-from approxtorch.nn import Conv2d_int
+from approxtorch.nn import Conv2d_int8
 from typing import Literal
 
 # this function convert the model into approximate model
@@ -52,7 +52,7 @@ def to_qat_int8(
                     "不再从包导出；如需使用请从 deprecated 目录恢复")
             else:
                 if decoupled:
-                    new_module = Conv2d_int.Conv2d_int8(
+                    new_module = Conv2d_int8(
                         in_channels = in_channels,
                         out_channels = out_channels,
                         kernel_size = kernel_size,

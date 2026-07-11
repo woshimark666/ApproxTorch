@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from torch.autograd import Function
 import approxtorch as at
 from approxtorch.nn import quantization, bgemm
-from approxtorch.nn.Conv2d_int import Conv2d_int8
+from approxtorch.nn.Conv2d_int8 import Conv2d_int8
 
 torch.manual_seed(0)
 dev = 'cuda'
