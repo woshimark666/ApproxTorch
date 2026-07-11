@@ -19,7 +19,8 @@
 #     odd-sized shape, plus the forced-NFLAT -> SFLAT grid.y-overflow fallback
 #  D. input-path variants: uint8-dtype x (prepass skipped, xq aliases input)
 #     vs fp32 x, non-contiguous x / w, fp32 clamp of out-of-range values
-#  E. LUT images: non-integer LUT (fp32 fallback), > int16-range LUT,
+#  E. LUT images: non-integer LUT (fp32 fallback), mixed-range LUT (fp32
+#     fallback), uint16-range LUT (u16 image path, incl. forced NFLAT/SFLAT),
 #     exact-product LUT lut[a][b] = a*b vs a plain einsum
 #  F. _save returns: wq == raw u8 w values, xq == raw u8 x values / alias
 import torch
@@ -166,9 +167,30 @@ y = op_u8(x_u, w_u, big_lut)
 ref = ref_bgemm(x_u.long(), w_u.long(), big_lut)
 report(torch.equal(y.double(), ref), 'LUT beyond int16 (fp32 fallback)')
 
+# uint16-range integer LUT (real uint8 x uint8 product tables land here:
+# values up to 65025 exceed int16 but fit the L1-resident uint16 image)
+u16_lut = torch.randint(0, 65536, (65536,), device=dev).float()
+u16_lut[0] = 0.0
+u16_lut[1] = 65535.0                       # uint16 extremes
+u16_lut[2] = 32768.0                       # just above int16 range
+x_u, w_u = make_inputs(2, 64, 33, 21)      # 65535*64 < 2^24: fp32-exact
+ref = ref_bgemm(x_u.long(), w_u.long(), u16_lut)
+report(torch.equal(op_u8(x_u, w_u, u16_lut).double(), ref),
+       'uint16-range LUT (u16 image path)')
+report(torch.equal(op_u8_cfg(x_u, w_u, u16_lut, 0).double(), ref),
+       'uint16-range LUT, forced NFLAT')
+report(torch.equal(op_u8_cfg(x_u, w_u, u16_lut, 100).double(), ref),
+       'uint16-range LUT, forced SFLAT (transposed u16 image)')
+
+# same but one negative entry: neither 16-bit interpretation fits -> fp32 path
+mix_lut = u16_lut.clone()
+mix_lut[300] = -3.0
+ref = ref_bgemm(x_u.long(), w_u.long(), mix_lut)
+report(torch.equal(op_u8(x_u, w_u, mix_lut).double(), ref),
+       'mixed-range LUT (fp32 fallback)')
+
 # exact-product LUT lut[a][b] = a * b: op == plain einsum
-# (values reach 255*255 = 65025 > int16 range -> exercises the fp32-LUT path,
-#  which is also the path real uint8 x uint8 multiplier tables will take)
+# (values reach 255*255 = 65025: uint16 image path, the real-table case)
 aa = torch.arange(256, device=dev).float()
 prod_lut = (aa.view(-1, 1) * aa.view(1, -1)).reshape(-1)
 x_u, w_u = make_inputs(3, 96, 25, 31)      # 255*255*96 < 2^24: fp32-exact

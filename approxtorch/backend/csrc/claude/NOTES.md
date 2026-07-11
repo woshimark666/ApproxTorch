@@ -36,13 +36,20 @@ whole game is gather efficiency:
    per k-step, 1KB row each; only 256 distinct rows exist in total).
    ~6 blocks/SM resident -> BM=16 keeps ~96KB hot and wins over BM=64
    even on big shapes (measured: cfg13/15 beat cfg11 broadly).
-4. **int16 LUT image**: the table has only 256 rows; as float it is 256KB
-   (2x L1), as int16 it is 128KB (≈ fits L1) and every gather pulls half
+4. **16-bit LUT image**: the table has only 256 rows; as float it is 256KB
+   (2x L1), as 16-bit it is 128KB (≈ fits L1) and every gather pulls half
    the sectors. Approximate 8x8 multiplier tables are integer-valued, so
-   an int16 copy is built per call and validated on device; the main
-   kernel branches on a grid-uniform device flag (no host sync). The
-   int16->float conversion is exact, so results stay bit-identical.
-   Non-integer LUTs silently fall back to the float path.
+   a 16-bit copy is built per call and validated on device; the main
+   kernel branches on grid-uniform device flags (no host sync). One image
+   serves two interpretations (the stored low 16 bits are the right bit
+   pattern for both): signed int16 for int8 tables ([-32767, 32767]) and
+   uint16 for uint8 x uint8 tables ([0, 65535] -- values reach 255*255 =
+   65025 > int16). The 16-bit->float conversion is exact either way, so
+   results stay bit-identical. Non-integer or mixed-sign-beyond-int16
+   LUTs silently fall back to the float path. Measured (RTX A6000,
+   uint8 x uint8 exact-product table, uniform-random data): uint16 image
+   is 1.3x (small shapes) to 2.4-2.5x (K >= 576 conv shapes) faster than
+   the float fallback.
 
 ## Structure
 
@@ -51,7 +58,8 @@ whole game is gather efficiency:
   a full `w.t().contiguous()` every call). Main kernel re-reads 1B/elem
   instead of 4B.
 - `prepare_lut_kernel<TRANSPOSE>`: single tiny per-call LUT preprocessing
-  launch (int16 image + validity flag, fused with the transpose for SFLAT).
+  launch (16-bit image + int16/uint16 validity flags, fused with the
+  transpose for SFLAT).
 - main kernel `bgemm_lut_u8_kernel<BM,BN,BK,TM,TN,MODE>`: 256 threads
   (32 x 8), register tile TM x TN per thread, smem tiles
   `srow[BK][BM]`, `scol[BK][BN]`, BK=32.

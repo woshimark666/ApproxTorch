@@ -44,6 +44,11 @@
 // chunk order); results stay deterministic and are exact whenever the LUT
 // holds integers and intermediate sums stay below 2^24 (the common case for
 // 8x8 approximate-multiplier tables).
+//
+// The 16-bit L1-resident LUT image covers both signed tables (int16, values
+// in [-32767, 32767]) and unsigned uint8 x uint8 tables (uint16, values up
+// to 65535 >= 255*255); see prepare_lut_kernel. Only mixed-sign tables
+// exceeding int16 fall back to the 256KB float image.
 
 #include <torch/extension.h>
 #include <cuda.h>
@@ -126,30 +131,40 @@ __global__ void quantize_to_u8_kernel(
 
 // LUT preprocessing (one kernel pass over 65536 entries, ~microseconds).
 //
-// int16 image: a float LUT is 256KB (twice the 128KB L1 of sm_89);
-// approximate-multiplier tables are integer-valued and fit int16, in which
+// 16-bit image: a float LUT is 256KB (twice the 128KB L1 of sm_89);
+// approximate-multiplier tables are integer-valued and fit 16 bits, in which
 // case the whole table is 128KB, gathers pull half the sectors, and most of
-// it stays L1-resident. `bad` (zero-initialized) is set if any entry is not
-// exactly representable; the main kernel reads it as a grid-uniform flag, so
-// no host synchronization is needed and results stay bit-identical (the
-// int16 -> float conversion is exact). Non-integer LUTs fall back to the
-// float image.
+// it stays L1-resident. Two interpretations share one image: signed int16
+// (8x8 signed tables, values in [-32767, 32767]) and uint16 (uint8 x uint8
+// tables, values in [0, 65535] — up to 255*255 = 65025, beyond int16). The
+// stored low 16 bits of the integer value are the correct bit pattern under
+// EITHER interpretation; `bad` is int[2] (zero-initialized), bad[0] set if
+// some entry is not exact int16, bad[1] if not exact uint16. The main kernel
+// reads both as grid-uniform flags (no host sync) and picks int16 -> uint16
+// -> float32; the 16-bit -> float conversion is exact either way, so results
+// stay bit-identical. Mixed-sign tables exceeding int16 fall back to float.
 //
-// TRANSPOSE=true additionally produces the transposed float/int16 images
+// TRANSPOSE=true additionally produces the transposed float/16-bit images
 // SFLAT mode needs, fused into the same launch.
 template<bool TRANSPOSE>
 __global__ void prepare_lut_kernel(
     const float* __restrict__ in,
     float* __restrict__ outf,    // transposed float image (TRANSPOSE only)
     short* __restrict__ out16,
-    int* __restrict__ bad)
+    int* __restrict__ bad)       // int[2]: [0] int16 invalid, [1] uint16 invalid
 {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;   // grid covers 65536
     const float v = in[i];
     const float r = rintf(v);
-    const bool good = (v == r) && (fabsf(v) <= 32767.0f);
-    if (!good) *bad = 1;
-    const short v16 = good ? static_cast<short>(r) : 0;
+    const bool is_int = (v == r);
+    const bool i16_ok = is_int && (fabsf(v) <= 32767.0f);
+    const bool u16_ok = is_int && (v >= 0.0f) && (v <= 65535.0f);
+    if (!i16_ok) bad[0] = 1;
+    if (!u16_ok) bad[1] = 1;
+    // low 16 bits of the integer value: valid pattern for both interpretations
+    const short v16 = (i16_ok || u16_ok)
+        ? static_cast<short>(static_cast<unsigned short>(static_cast<int>(r)))
+        : 0;
     if constexpr (TRANSPOSE) {
         const int o = ((i & 255) << 8) | (i >> 8);   // [x][w] -> [w][x]
         outf[o]  = v;
@@ -359,10 +374,16 @@ bgemm_lut_u8_kernel(
         for (int j = 0; j < TN; ++j)
             acc[i][j] = 0.0f;
 
-    // grid-uniform branch (flag identical for every block -> sync-safe)
-    if (__ldg(lut16_bad) == 0) {
+    // grid-uniform branch (flags identical for every block -> sync-safe):
+    // int16 image -> uint16 image (same bits, unsigned read) -> float LUT
+    if (__ldg(lut16_bad + 0) == 0) {
         bgemm_mainloop<BM, BN, BK, TM, TN, MODE>(
             rowsrc, colsrc, lut16, srow, scol, acc,
+            K, R, C, L, kbeg, kend, r0, c0, tx, ty, tid);
+    } else if (__ldg(lut16_bad + 1) == 0) {
+        bgemm_mainloop<BM, BN, BK, TM, TN, MODE>(
+            rowsrc, colsrc, reinterpret_cast<const unsigned short*>(lut16),
+            srow, scol, acc,
             K, R, C, L, kbeg, kend, r0, c0, tx, ty, tid);
     } else {
         bgemm_mainloop<BM, BN, BK, TM, TN, MODE>(
@@ -620,9 +641,10 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bgemm_forward_sav
         K, 0, 0, L, O, f32opts, stream.stream()
     };
 
-    // LUT images: int16 (+ transposed copies for SFLAT) and validity flag
+    // LUT images: 16-bit (+ transposed copies for SFLAT) and validity flags
+    // [0]: int16 interpretation invalid, [1]: uint16 interpretation invalid
     auto lut16 = torch::empty({256 * 256}, u8opts.dtype(torch::kInt16));
-    auto lut16_bad = torch::zeros({1}, u8opts.dtype(torch::kInt32));
+    auto lut16_bad = torch::zeros({2}, u8opts.dtype(torch::kInt32));
     torch::Tensor lutT;   // keep alive until kernel runs
     a.lut16 = lut16.data_ptr<short>();
     a.lut16_bad = lut16_bad.data_ptr<int>();
