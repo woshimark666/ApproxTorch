@@ -5,7 +5,7 @@ from . import quantization
 import approxtorch as at
 import torch.nn as nn
 from torch.nn.modules.utils import _pair
-from . import bgemm
+from . import bgemm_int8
 
 class Conv2d_int8(nn.Module): 
     def __init__(self,
@@ -207,13 +207,13 @@ class Conv2d_int8(nn.Module):
             # （fp32 unfold 和 kernel 的 fp32->u8 prepass 都不再发生），
             # depthwise（groups==C）则走专用 dwconv LUT kernel；
             # backward 对 k!=1 走 cuDNN 等价卷积（原生支持 groups）、直接返回
-            # 图像空间梯度。ste 的反传 = 普通卷积反传，见 bgemm.py
+            # 图像空间梯度。ste 的反传 = 普通卷积反传，见 bgemm_int8.py
             geom = (kernel_size, self.stride, self.padding, self.dilation, self.groups)
             if self.grad == 'lre':
-                y = bgemm.conv2d_int8_lre(
+                y = bgemm_int8.conv2d_int8_lre(
                     x, w.view(self.out_channels, -1), self.lut, self.dx, self.dw, geom)
             else:
-                y = bgemm.conv2d_int8_ste(
+                y = bgemm_int8.conv2d_int8_ste(
                     x, w.view(self.out_channels, -1), self.lut, geom)
         else:
             # im2col shape transform
@@ -229,7 +229,7 @@ class Conv2d_int8(nn.Module):
 
             match self.grad:
                 case 'bqsg64':
-                    y = bgemm.bgemm_int8_bqsg64(x, w , self.lut, self.coefficient)
+                    y = bgemm_int8.bgemm_int8_bqsg64(x, w , self.lut, self.coefficient)
                 case _:
                     raise ValueError("Invalid gradient method")
 

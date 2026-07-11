@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import approxtorch as at
-from approxtorch.nn import quantization, bgemm
+from approxtorch.nn import quantization, bgemm_int8 as bgemm
 from approxtorch.nn.Conv2d_int8 import Conv2d_int8
 
 torch.manual_seed(0)

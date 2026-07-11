@@ -7,15 +7,15 @@
 //   bgemm_fake_int8_forward_cuda_claude(Tensor x[N,K,L] f32, Tensor w[O,K] f32,
 //                                       Tensor lut[65536] f32) -> Tensor y[N,O,L] f32
 //
-// uint8 variant (unsigned activation x signed weight approximate multiplier):
+// uint8 variant (uint8 x uint8 approximate multiplier, asymmetric quant):
 //   bgemm_fake_uint8_forward_cuda_claude(x, w, lut)
-//     y[n, o, l] = sum_k lut[round(x[n,k,l]) * 256 + (round(w[o,k]) + 128)]
-//   x holds unsigned quantized values in [0, 255] (LUT row index = the value
-//   itself, no offset), w stays signed symmetric in [-128, 127] (column index
-//   = value + 128, unchanged). Only the x prepass offset differs (0 vs 128);
-//   the main kernel is byte-index based and shared verbatim, so every mode /
-//   tiling / split-K property below applies to both ops. The LUT layout is
-//   lut[x_u8][w_i8 + 128].
+//     y[n, o, l] = sum_k lut[round(x[n,k,l]) * 256 + round(w[o,k])]
+//   BOTH operands hold unsigned quantized values in [0, 255]; the LUT index
+//   is the raw value itself (no +128 offset on either side), layout
+//   lut[x_u8][w_u8]. Zero-point corrections are the caller's job (nn layer).
+//   Only the prepass offsets differ (0/0 vs 128/128); the main kernel is
+//   byte-index based and shared verbatim, so every mode / tiling / split-K
+//   property below applies to both ops.
 //
 // Key optimizations vs the reference:
 //  1. One cheap prepass quantizes x and w to uint8 once. The main kernel then
@@ -83,8 +83,8 @@ static inline bool ptr_aligned(const void* p, uintptr_t bytes) {
 // ---------------------------------------------------------------------------
 // Prepass: quantize float (integer values stored as float) -> uint8 LUT index
 // (value + offset, clamped to [0,255]), vectorized float4 -> uchar4.
-// offset 128: signed operand in [-128,127] (int8 op, both x and w; the uint8
-// op's weight side). offset 0: unsigned operand in [0,255] (uint8 op's x).
+// offset 128: signed operand in [-128,127] (int8 op). offset 0: unsigned
+// operand in [0,255] (uint8 op, both x and w).
 // ---------------------------------------------------------------------------
 
 __device__ __forceinline__ uint8_t quantize_one(float v, int offset)
@@ -525,16 +525,17 @@ static int pick_cfg_sflat(long long R, long long C)
 // LUT indices) OR uint8 (already LUT indices, e.g. from im2col_u8; the x
 // prepass is skipped entirely and the returned xq aliases the input).
 //
-// x_offset selects the x-operand semantics: 128 = signed int8 values
-// [-128,127], 0 = unsigned uint8 values [0,255]. Only the fp32 prepass uses
-// it; a uint8-dtype x is already LUT indices under either convention. The
-// weight prepass is always +128 (signed symmetric).
+// x_offset / w_offset select the operand semantics: 128 = signed int8 values
+// [-128,127], 0 = unsigned uint8 values [0,255]. int8 op: (128, 128);
+// uint8 op: (0, 0). Only the fp32 prepasses use them; a uint8-dtype x is
+// already LUT indices under either convention.
 static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bgemm_forward_save_cfg_impl(
     const torch::Tensor& x,
     const torch::Tensor& w,
     const torch::Tensor& lut,
     int64_t cfg,
-    int x_offset)
+    int x_offset,
+    int w_offset)
 {
     const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
 
@@ -587,7 +588,7 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bgemm_forward_sav
                          static_cast<long long>(N) * K * L, x_offset);
         }
         launch_quant(wc.data_ptr<float>(), wq.data_ptr<uint8_t>(),
-                     static_cast<long long>(O) * K, 128);
+                     static_cast<long long>(O) * K, w_offset);
     }
 
     auto y = torch::empty({N, O, L}, f32opts);
@@ -672,7 +673,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bgemm_lut_forward_cuda_c
     const torch::Tensor& lut,
     int64_t cfg)
 {
-    return bgemm_forward_save_cfg_impl(x, w, lut, cfg, 128);
+    return bgemm_forward_save_cfg_impl(x, w, lut, cfg, 128, 128);
 }
 
 torch::Tensor bgemm_lut_forward_cuda_claude_cfg(
@@ -700,7 +701,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bgemm_lut_forward_cuda_c
     return bgemm_lut_forward_cuda_claude_save_cfg(x, w, lut, -1);
 }
 
-// ---- uint8 entry points (x offset 0: unsigned activation, signed weight) ----
+// ---- uint8 entry points (offsets 0/0: uint8 x uint8, raw values as indices) ----
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bgemm_lut_forward_cuda_claude_u8_save_cfg(
     const torch::Tensor& x,
@@ -708,7 +709,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bgemm_lut_forward_cuda_c
     const torch::Tensor& lut,
     int64_t cfg)
 {
-    return bgemm_forward_save_cfg_impl(x, w, lut, cfg, 0);
+    return bgemm_forward_save_cfg_impl(x, w, lut, cfg, 0, 0);
 }
 
 torch::Tensor bgemm_lut_forward_cuda_claude_u8_cfg(

@@ -216,7 +216,7 @@ kernels are templated on input dtype (char4/uchar4 vectorized).
 `bgemm_fake_int8_forward_cuda_claude_save(x, w, lut) -> (y, xq, wq)`
 additionally returns the forward's internal u8 quantized images for free
 (they were always computed; plain op = `std::get<0>`). The lre autograd
-Function (`nn/bgemm.py`) saves xq/wq instead of fp32 x/w: saved-activation
+Function (`nn/bgemm_int8.py`) saves xq/wq instead of fp32 x/w: saved-activation
 memory 4x down (e.g. B32 C64 56^2 k3 layer: 270 -> 105 MB held after
 forward, the rest is fakequant's scaled_x + misc), backward X'-map reads
 1B/elem instead of 4 (op-level ~1.2x on map-bound shapes), no cast kernels
@@ -279,7 +279,7 @@ Cumulative held-after-forward on B32 C64 56^2 k3 (lre):
 ## conv-restructure: u8 im2col forward + cuDNN backward (2026-06-11)
 
 Conv2d_int8_decoupled (lre) no longer goes through F.unfold at all; the
-autograd Function (nn/bgemm.py `_conv2d_int8_lre`) takes the fake-quantized
+autograd Function (nn/bgemm_int8.py `_conv2d_int8_lre`) takes the fake-quantized
 IMAGE and returns image-space gradients.
 
 Forward: the fp32 unfold + the bgemm kernel's fp32->u8 prepass were a pure

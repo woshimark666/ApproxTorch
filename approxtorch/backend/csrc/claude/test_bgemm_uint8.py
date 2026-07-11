@@ -1,7 +1,9 @@
 # Correctness tests for the uint8 BGEMM forward
-# (op: bgemm_fake_uint8_forward_cuda_claude, unsigned activation x signed weight):
+# (op: bgemm_fake_uint8_forward_cuda_claude, uint8 x uint8 multiplier):
 #
-#   y[n,o,l] = sum_k lut[x_u8[n,k,l] * 256 + (w_i8[o,k] + 128)]
+#   y[n,o,l] = sum_k lut[x_u8[n,k,l] * 256 + w_u8[o,k]]
+#
+# both operands are raw unsigned values in [0,255] (index = value, no offset).
 #
 # All comparisons are EXACT (torch.equal / max-abs == 0): LUT values and K are
 # chosen so every fp32 partial sum is exactly representable (integer sums
@@ -11,15 +13,15 @@
 #  A. independent oracle: chunked double-precision gather-sum over LUT indices,
 #     across a shape sweep hitting XMK / NFLAT / SFLAT, split-K, K tails,
 #     tile-boundary +/-1 sizes, N=O=L=1 edges
-#  B. bit-equivalence with the int8 op: uint8(x, w, lut) == int8(x - 128, w, lut)
+#  B. bit-equivalence with the int8 op: uint8(x, w) == int8(x - 128, w - 128)
 #     (identical index streams -> identical kernels must agree bitwise)
 #  C. forced-cfg sweep: every dispatch table entry x {NFLAT, SFLAT(+100)} on an
 #     odd-sized shape, plus the forced-NFLAT -> SFLAT grid.y-overflow fallback
 #  D. input-path variants: uint8-dtype x (prepass skipped, xq aliases input)
 #     vs fp32 x, non-contiguous x / w, fp32 clamp of out-of-range values
 #  E. LUT images: non-integer LUT (fp32 fallback), > int16-range LUT,
-#     exact-product LUT lut[a][b] = a*(b-128) vs a plain einsum
-#  F. _save returns: wq == w + 128, xq == raw u8 values / alias of u8 input
+#     exact-product LUT lut[a][b] = a*b vs a plain einsum
+#  F. _save returns: wq == raw u8 w values, xq == raw u8 x values / alias
 import torch
 import approxtorch as at
 
@@ -68,14 +70,14 @@ def ref_bgemm(x_idx, w_idx, lut, kc=16, lc=32768):
 
 
 def make_inputs(N, K, L, O):
-    # full index ranges: x in [0,255] incl. both ends, w in [-128,127] incl. ends
+    # full index ranges: x and w both in [0,255] incl. both ends
     x_u = torch.randint(0, 256, (N, K, L), device=dev).float()
-    w_s = torch.randint(-128, 128, (O, K), device=dev).float()
+    w_u = torch.randint(0, 256, (O, K), device=dev).float()
     x_u.view(-1)[0] = 0.0
     x_u.view(-1)[-1] = 255.0
-    w_s.view(-1)[0] = -128.0
-    w_s.view(-1)[-1] = 127.0
-    return x_u, w_s
+    w_u.view(-1)[0] = 0.0
+    w_u.view(-1)[-1] = 255.0
+    return x_u, w_u
 
 
 # integer LUT small enough that |sum over K| < 2^24 for every tested K
@@ -99,88 +101,90 @@ shapes = [
 ]
 
 for (N, K, L, O) in shapes:
-    x_u, w_s = make_inputs(N, K, L, O)
-    ref = ref_bgemm(x_u.long(), (w_s.long() + 128), int_lut)
+    x_u, w_u = make_inputs(N, K, L, O)
+    ref = ref_bgemm(x_u.long(), w_u.long(), int_lut)
 
     # A: fp32 x path vs oracle
-    y = op_u8(x_u, w_s, int_lut)
+    y = op_u8(x_u, w_u, int_lut)
     report(torch.equal(y.double(), ref), f'oracle fp32-x   N{N} K{K} L{L} O{O}')
 
     # D: uint8-dtype x path (values are already LUT indices)
-    y8 = op_u8(x_u.to(torch.uint8), w_s, int_lut)
+    y8 = op_u8(x_u.to(torch.uint8), w_u, int_lut)
     report(torch.equal(y8, y), f'u8-dtype x path N{N} K{K} L{L} O{O}')
 
     # B: bit-equivalence with the int8 op on the shifted signed image
-    yi = op_i8(x_u - 128.0, w_s, int_lut)
+    yi = op_i8(x_u - 128.0, w_u - 128.0, int_lut)
     report(torch.equal(yi, y), f'int8-op equiv   N{N} K{K} L{L} O{O}')
 
 # D: non-contiguous inputs (strided slices; host contiguous()-normalizes)
-x_u, w_s = make_inputs(3, 40, 30, 20)
+x_u, w_u = make_inputs(3, 40, 30, 20)
 x_nc = torch.repeat_interleave(x_u, 2, dim=2)[:, :, ::2]
-w_nc = torch.repeat_interleave(w_s, 2, dim=1)[:, ::2]
+w_nc = torch.repeat_interleave(w_u, 2, dim=1)[:, ::2]
 assert not x_nc.is_contiguous() and not w_nc.is_contiguous()
-report(torch.equal(op_u8(x_nc, w_nc, int_lut), op_u8(x_u, w_s, int_lut)),
+report(torch.equal(op_u8(x_nc, w_nc, int_lut), op_u8(x_u, w_u, int_lut)),
        'non-contiguous x / w')
 
 # D: fp32 prepass clamps out-of-range values to [0, 255]
-x_u, w_s = make_inputs(2, 24, 11, 9)
+x_u, w_u = make_inputs(2, 24, 11, 9)
 x_oob = x_u.clone(); x_oob.view(-1)[1] = 300.0; x_oob.view(-1)[2] = -7.0
 x_cl = x_oob.clamp(0, 255)
-report(torch.equal(op_u8(x_oob, w_s, int_lut), op_u8(x_cl, w_s, int_lut)),
+report(torch.equal(op_u8(x_oob, w_u, int_lut), op_u8(x_cl, w_u, int_lut)),
        'fp32 x clamp to [0,255]')
 
 # ------------------------------------------------------------------------ C
 # forced-cfg sweep on an odd shape: every dispatch entry, NFLAT and SFLAT
-x_u, w_s = make_inputs(3, 97, 53, 67)
-ref = ref_bgemm(x_u.long(), (w_s.long() + 128), int_lut)
+x_u, w_u = make_inputs(3, 97, 53, 67)
+ref = ref_bgemm(x_u.long(), w_u.long(), int_lut)
 for cfg in [0, 1, 2, 3, 7, 9, 10, 11, 13, 14, 15, 16, 17, 18]:
-    y = op_u8_cfg(x_u, w_s, int_lut, cfg)
+    y = op_u8_cfg(x_u, w_u, int_lut, cfg)
     report(torch.equal(y.double(), ref), f'forced cfg {cfg:3d} (NFLAT)')
-    y = op_u8_cfg(x_u, w_s, int_lut, cfg + 100)
+    y = op_u8_cfg(x_u, w_u, int_lut, cfg + 100)
     report(torch.equal(y.double(), ref), f'forced cfg {cfg + 100:3d} (SFLAT)')
 
 # C: forced-NFLAT with huge N*L -> grid.y overflow -> auto SFLAT fallback
 N, K, L, O = 2, 8, 270000, 8          # N*L = 540000 > 8 * 65535
 x_u = torch.randint(0, 256, (N, K, L), device=dev).float()
-w_s = torch.randint(-128, 128, (O, K), device=dev).float()
-ref = ref_bgemm(x_u.long(), (w_s.long() + 128), int_lut, kc=8)
-y = op_u8_cfg(x_u, w_s, int_lut, 0)   # cfg 0 forces NFLAT; must fall back
+w_u = torch.randint(0, 256, (O, K), device=dev).float()
+ref = ref_bgemm(x_u.long(), w_u.long(), int_lut, kc=8)
+y = op_u8_cfg(x_u, w_u, int_lut, 0)   # cfg 0 forces NFLAT; must fall back
 report(torch.equal(y.double(), ref), 'grid.y-overflow NFLAT->SFLAT fallback')
 
 # ------------------------------------------------------------------------ E
 # non-integer LUT -> fp32-LUT fallback (0.5 grid keeps fp32 sums exact)
-x_u, w_s = make_inputs(2, 64, 33, 21)
+x_u, w_u = make_inputs(2, 64, 33, 21)
 half_lut = torch.randint(-128, 128, (65536,), device=dev).float() * 0.5
-y = op_u8(x_u, w_s, half_lut)
-ref = ref_bgemm(x_u.long(), (w_s.long() + 128), half_lut)
+y = op_u8(x_u, w_u, half_lut)
+ref = ref_bgemm(x_u.long(), w_u.long(), half_lut)
 report(torch.equal(y.double(), ref), 'non-integer LUT (fp32 fallback)')
 
 # integer LUT beyond int16 range -> fp32-LUT fallback (K small: sums exact)
 big_lut = torch.randint(-64, 64, (65536,), device=dev).float()
 big_lut[123 * 256 + 45] = 40000.0
 big_lut[7 * 256 + 200] = -40000.0
-x_u, w_s = make_inputs(2, 8, 17, 13)
-y = op_u8(x_u, w_s, big_lut)
-ref = ref_bgemm(x_u.long(), (w_s.long() + 128), big_lut)
+x_u, w_u = make_inputs(2, 8, 17, 13)
+y = op_u8(x_u, w_u, big_lut)
+ref = ref_bgemm(x_u.long(), w_u.long(), big_lut)
 report(torch.equal(y.double(), ref), 'LUT beyond int16 (fp32 fallback)')
 
-# exact-product LUT lut[a][b] = a * (b - 128): op == plain einsum
+# exact-product LUT lut[a][b] = a * b: op == plain einsum
+# (values reach 255*255 = 65025 > int16 range -> exercises the fp32-LUT path,
+#  which is also the path real uint8 x uint8 multiplier tables will take)
 aa = torch.arange(256, device=dev).float()
-prod_lut = (aa.view(-1, 1) * (aa.view(1, -1) - 128)).reshape(-1)
-x_u, w_s = make_inputs(3, 96, 25, 31)      # 255*127*96 < 2^24: fp32-exact
-y = op_u8(x_u, w_s, prod_lut)
-ref = torch.einsum('nkl,ok->nol', x_u.double(), w_s.double())
+prod_lut = (aa.view(-1, 1) * aa.view(1, -1)).reshape(-1)
+x_u, w_u = make_inputs(3, 96, 25, 31)      # 255*255*96 < 2^24: fp32-exact
+y = op_u8(x_u, w_u, prod_lut)
+ref = torch.einsum('nkl,ok->nol', x_u.double(), w_u.double())
 report((y.double() - ref).abs().max().item() == 0.0,
-       'exact-product LUT == einsum(x_u, w_s)')
+       'exact-product LUT == einsum(x_u, w_u)')
 
 # ------------------------------------------------------------------------ F
-x_u, w_s = make_inputs(2, 32, 19, 11)
-y, xq, wq = op_u8_save(x_u, w_s, int_lut)
+x_u, w_u = make_inputs(2, 32, 19, 11)
+y, xq, wq = op_u8_save(x_u, w_u, int_lut)
 report(torch.equal(xq, x_u.to(torch.uint8)), '_save: xq == raw u8 x values')
-report(torch.equal(wq, (w_s + 128).to(torch.uint8)), '_save: wq == w + 128')
-report(torch.equal(y, op_u8(x_u, w_s, int_lut)), '_save: y matches plain op')
+report(torch.equal(wq, w_u.to(torch.uint8)), '_save: wq == raw u8 w values')
+report(torch.equal(y, op_u8(x_u, w_u, int_lut)), '_save: y matches plain op')
 x8 = x_u.to(torch.uint8)
-y2, xq2, _ = op_u8_save(x8, w_s, int_lut)
+y2, xq2, _ = op_u8_save(x8, w_u, int_lut)
 report(xq2.data_ptr() == x8.data_ptr(), '_save: u8-dtype x -> xq aliases input')
 report(torch.equal(y2, y), '_save: u8-dtype x -> same y')
 
