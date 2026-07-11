@@ -20,6 +20,8 @@ cuda_functions = CUDAExtension('approxtorch.backend._C',[
         './approxtorch/backend/csrc/cuda/bgemm_float_gpt.cu',
         # claude-optimized bgemm (op: bgemm_fake_int8_forward_cuda_claude)
         './approxtorch/backend/csrc/claude/bgemm_float_claude.cu',
+        # claude LUT gemm, int8 + uint8 (ops: gemm_fake_(u)int8_forward_cuda_claude)
+        './approxtorch/backend/csrc/claude/gemm.cu',
         './approxtorch/backend/csrc/cuda/bgemm_lre_backward.cu',
         # claude-optimized LRE backward (op: bgemm_lre_backward_claude)
         './approxtorch/backend/csrc/claude/bgemm_lre_backward_claude.cu',
@@ -32,7 +34,7 @@ cuda_functions = CUDAExtension('approxtorch.backend._C',[
         './approxtorch/backend/csrc/cuda/elementwise_mul.cu',
     ],                   
     include_dirs = ['./approxtorch/backend/csrc/cuda'],
-    extra_compile_args={'nvcc': ['-arch=native', '-std=c++17', "-O3"],
+    extra_compile_args={'nvcc': ['-arch=native', '-std=c++17', "-O3", "--split-compile=0"],
                         "cxx": ["-O3","-fdiagnostics-color=always",
                                 "-DPy_LIMITED_API=0x03090000",  # min CPython version 3.9
                                 ]},

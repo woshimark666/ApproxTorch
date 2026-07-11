@@ -125,6 +125,29 @@ def bgemm_fake_uint8_claude_save(X: Tensor, W: Tensor, lut: Tensor) -> tuple[Ten
     return torch.ops.approxtorch.bgemm_fake_uint8_forward_cuda_claude_save.default(X, W, lut)
 
 
+# claude LUT GEMM, torch.mm layout: A [M,K] @ B [K,N] -> y [M,N].
+#   int8:  y[m,n] = sum_k lut[(A[m,k]+128)*256 + (B[k,n]+128)]
+#   uint8: y[m,n] = sum_k lut[A[m,k]*256 + B[k,n]]        (raw values)
+# A: fp32 integer values or uint8 (already LUT indices). B: fp32 or uint8,
+# any strides — the [K,N]->[N,K] transpose is fused into the u8 quantize
+# prepass, so B = W.t() views cost the same as contiguous B.
+# _save also returns the u8 images (aq [M,K], bq [N,K] — bq is transposed).
+def gemm_fake_int8_claude(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
+    return torch.ops.approxtorch.gemm_fake_int8_forward_cuda_claude.default(A, B, lut)
+
+
+def gemm_fake_int8_claude_save(A: Tensor, B: Tensor, lut: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    return torch.ops.approxtorch.gemm_fake_int8_forward_cuda_claude_save.default(A, B, lut)
+
+
+def gemm_fake_uint8_claude(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
+    return torch.ops.approxtorch.gemm_fake_uint8_forward_cuda_claude.default(A, B, lut)
+
+
+def gemm_fake_uint8_claude_save(A: Tensor, B: Tensor, lut: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    return torch.ops.approxtorch.gemm_fake_uint8_forward_cuda_claude_save.default(A, B, lut)
+
+
 def bgemm_lre_backward(grad_output: Tensor, x: Tensor, w: Tensor, dx: Tensor, dw: Tensor) -> tuple[Tensor, Tensor]:
     return torch.ops.approxtorch.bgemm_lre_backward.default(grad_output, x, w, dx, dw)
 

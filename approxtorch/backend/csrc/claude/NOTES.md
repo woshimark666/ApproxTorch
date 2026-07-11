@@ -404,3 +404,26 @@ reduction order, transform-based algorithms are not sums. Bitwise oracles
 must use unfold+matmul (cuBLAS). The fuzz failure that exposed this was in
 the oracle, not in the kernels (module output matched the tap-ordered
 reference exactly).
+
+## gemm.cu — plain LUT GEMM on the shared machinery
+
+`gemm_fake_(u)int8_forward_cuda_claude(A [M,K], B [K,N], lut) -> y [M,N]`
+(torch.mm layout; int8 indexes value+128 on both operands, uint8 raw
+values). The kernels, cfg table, split-K and 16-bit LUT imaging are the
+same TU-shared header (`bgemm_lut_kernels.cuh`) the BGEMM uses; GEMM adds:
+
+- fused quantize+transpose prepass for B ([K,N] any strides -> u8 [N,K]
+  image, 32x32 smem tile): no fp32 `B.t().contiguous()` ever happens, and
+  a transposed weight view `B = W.t()` costs the same as contiguous B.
+- warp-along-the-larger-dim orientation, which the bgemm host never does
+  for L==1: XMK (rows=M, cols=N) when N is wide, or the SFLAT machinery
+  with L=1 (rows=N, cols=M, transposed LUT; its epilogue lands exactly on
+  row-major y) when M >= 2N. Measured on skewed shapes (65536x512x32 and
+  transpose): wrong orientation is 1.5-2.9x slower.
+- grid.y overflow (rows > 65535*BM) silently flips orientation; only
+  min(M,N) > ~524k errors out. M=0/N=0 return empty, K=0 writes zeros.
+
+Measured (RTX A6000, int16-path LUT, uniform-random operands): ~1.7-1.9
+effective TGOP/s across 4096^3 .. 65536x512x256; 8.6x faster than the
+legacy `gemm_int8` op at 4096^3 (625 ms -> 72 ms). uint8 with a real
+product table (uint16 image) runs at int8 speed.
