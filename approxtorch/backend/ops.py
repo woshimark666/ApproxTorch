@@ -111,6 +111,19 @@ def bgemm_fake_int8_claude_save(X: Tensor, W: Tensor, lut: Tensor) -> tuple[Tens
     return torch.ops.approxtorch.bgemm_fake_int8_forward_cuda_claude_save.default(X, W, lut)
 
 
+# uint8 variant (unsigned activation x signed weight):
+#   y[n,o,l] = sum_k lut[X[n,k,l] * 256 + (W[o,k] + 128)]
+# X holds unsigned quantized values in [0,255] (fp32 integer values, or uint8
+# dtype = already LUT indices); W stays signed symmetric in [-128,127] fp32.
+# LUT layout: lut[x_u8][w_i8 + 128]. Same kernel/modes as the int8 op.
+def bgemm_fake_uint8_claude(X: Tensor, W: Tensor, lut: Tensor) -> Tensor:
+    return torch.ops.approxtorch.bgemm_fake_uint8_forward_cuda_claude.default(X, W, lut)
+
+
+def bgemm_fake_uint8_claude_save(X: Tensor, W: Tensor, lut: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    return torch.ops.approxtorch.bgemm_fake_uint8_forward_cuda_claude_save.default(X, W, lut)
+
+
 def bgemm_lre_backward(grad_output: Tensor, x: Tensor, w: Tensor, dx: Tensor, dw: Tensor) -> tuple[Tensor, Tensor]:
     return torch.ops.approxtorch.bgemm_lre_backward.default(grad_output, x, w, dx, dw)
 
