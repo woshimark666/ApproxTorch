@@ -7,9 +7,12 @@ __all__ = ['im2col_int8',
            'im2col_uint8', 
            'gemm_int8', 
            'gemm_uint8',
-           'gemm_int8_naive', 
+           'gemm_int8_naive',
+           'gemm_uint8_naive',
            'bgemm_int8', 
-           'bgemm_uint8', 
+           'bgemm_uint8',
+           'bgemm_int8_naive',
+           'bgemm_uint8_naive',
            'bgemm_gradual_approx_int8']
 
 def im2col_int8(feature: Tensor, kernel_size, stride=1, padding=0, dilation=1) -> Tensor:
@@ -51,17 +54,23 @@ def gemm_int8(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
 def gemm_uint8(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
     return torch.ops.approxtorch.gemm_uint8.default(A, B, lut)
 
-# def gemm_int8_naive(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
-#     return torch.ops.approxtorch.gemm_int8_naive.default(A, B, lut)
+def gemm_int8_naive(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
+    return torch.ops.approxtorch.gemm_int8_naive.default(A, B, lut)
 
-# def gemm_uint8_naive(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
-#     return torch.ops.approxtorch.gemm_uint8_naive.default(A, B, lut)
+def gemm_uint8_naive(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
+    return torch.ops.approxtorch.gemm_uint8_naive.default(A, B, lut)
 
 def bgemm_int8(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
     return torch.ops.approxtorch.bgemm_int8.default(A, B, lut)
 
 def bgemm_uint8(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
     return torch.ops.approxtorch.bgemm_uint8.default(A, B, lut)
+
+def bgemm_int8_naive(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
+    return torch.ops.approxtorch.bgemm_int8_naive.default(A, B, lut)
+
+def bgemm_uint8_naive(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
+    return torch.ops.approxtorch.bgemm_uint8_naive.default(A, B, lut)
 
 
 # def bgemm_custom_grad_uint8_naive(X: Tensor, W: Tensor, dY: Tensor, dx_lut: Tensor, dw_lut: Tensor) -> Tensor:
