@@ -1,7 +1,7 @@
 """Exact checks for the deliberately naive LUT GEMM/BGEMM CUDA ops.
 
 Run after rebuilding the extension:
-    python approxtorch/backend/csrc/cuda/test_naive_lut_ops.py
+    python approxtorch/backend/csrc/naive_cuda/test_naive_lut_ops.py
 
 The asymmetric LUT is intentional: it detects accidental reversal of the two
 LUT operands.  Both GEMM and BGEMM obey the invariant that the first API
