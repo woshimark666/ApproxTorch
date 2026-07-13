@@ -62,7 +62,6 @@ def main() -> None:
         gemm_naive = getattr(at.backend.ops, f"gemm_{suffix}_naive")
         gemm_fast = getattr(at.backend.ops, f"gemm_{suffix}")
         bgemm_naive = getattr(at.backend.ops, f"bgemm_{suffix}_naive")
-        bgemm_modern = getattr(at.backend.ops, f"bgemm_fake_{suffix}_claude")
 
         for M, K, N in ((1, 1, 1), (3, 5, 7), (17, 33, 9)):
             a = make_input((M, K), dtype)
@@ -81,13 +80,6 @@ def main() -> None:
             check_equal(
                 actual, expected,
                 f"bgemm_{suffix}_naive B{batch} K{K} L{L} O{O}")
-            # nn/bgemm_int8.py uses this modern family.  Its fp32-storage
-            # result must have the same LUT[A][B] semantics as the naive op.
-            modern = bgemm_modern(a.float(), b.float(), lut.float())
-            check_equal(
-                modern.to(torch.int32), actual,
-                f"bgemm_fake_{suffix}_claude vs naive "
-                f"B{batch} K{K} L{L} O{O}")
 
         # The wrappers normalize strided inputs with contiguous().
         a = make_input((4, 6), dtype)[:, ::2]

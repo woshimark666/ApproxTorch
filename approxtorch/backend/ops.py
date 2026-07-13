@@ -9,10 +9,18 @@ __all__ = ['im2col_int8',
            'gemm_uint8',
            'gemm_int8_naive',
            'gemm_uint8_naive',
+           'gemm_lre_backward_int8_naive',
+           'gemm_lre_backward_uint8_naive',
+           'gemm_custom_grad_int8_naive',
+           'gemm_custom_grad_uint8_naive',
            'bgemm_int8', 
            'bgemm_uint8',
            'bgemm_int8_naive',
            'bgemm_uint8_naive',
+           'bgemm_lre_backward_int8_naive',
+           'bgemm_lre_backward_uint8_naive',
+           'bgemm_custom_grad_int8_naive',
+           'bgemm_custom_grad_uint8_naive',
            'bgemm_gradual_approx_int8']
 
 def im2col_int8(feature: Tensor, kernel_size, stride=1, padding=0, dilation=1) -> Tensor:
@@ -60,6 +68,30 @@ def gemm_int8_naive(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
 def gemm_uint8_naive(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
     return torch.ops.approxtorch.gemm_uint8_naive.default(A, B, lut)
 
+def gemm_lre_backward_int8_naive(
+        grad_output: Tensor, A: Tensor, B: Tensor,
+        dx_lut: Tensor, dw_lut: Tensor) -> tuple[Tensor, Tensor]:
+    return torch.ops.approxtorch.gemm_lre_backward_int8_naive.default(
+        grad_output, A, B, dx_lut, dw_lut)
+
+def gemm_lre_backward_uint8_naive(
+        grad_output: Tensor, A: Tensor, B: Tensor,
+        dx_lut: Tensor, dw_lut: Tensor) -> tuple[Tensor, Tensor]:
+    return torch.ops.approxtorch.gemm_lre_backward_uint8_naive.default(
+        grad_output, A, B, dx_lut, dw_lut)
+
+def gemm_custom_grad_int8_naive(
+        A: Tensor, B: Tensor, dY: Tensor,
+        dx_lut: Tensor, dw_lut: Tensor) -> tuple[Tensor, Tensor]:
+    return torch.ops.approxtorch.gemm_custom_grad_int8_naive.default(
+        A, B, dY, dx_lut, dw_lut)
+
+def gemm_custom_grad_uint8_naive(
+        A: Tensor, B: Tensor, dY: Tensor,
+        dx_lut: Tensor, dw_lut: Tensor) -> tuple[Tensor, Tensor]:
+    return torch.ops.approxtorch.gemm_custom_grad_uint8_naive.default(
+        A, B, dY, dx_lut, dw_lut)
+
 def bgemm_int8(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
     return torch.ops.approxtorch.bgemm_int8.default(A, B, lut)
 
@@ -72,12 +104,30 @@ def bgemm_int8_naive(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
 def bgemm_uint8_naive(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
     return torch.ops.approxtorch.bgemm_uint8_naive.default(A, B, lut)
 
+def bgemm_lre_backward_int8_naive(
+        grad_output: Tensor, x: Tensor, w: Tensor,
+        dx_lut: Tensor, dw_lut: Tensor) -> tuple[Tensor, Tensor]:
+    return torch.ops.approxtorch.bgemm_lre_backward_int8_naive.default(
+        grad_output, x, w, dx_lut, dw_lut)
 
-# def bgemm_custom_grad_uint8_naive(X: Tensor, W: Tensor, dY: Tensor, dx_lut: Tensor, dw_lut: Tensor) -> Tensor:
-#     return torch.ops.approxtorch.bgemm_custom_grad_uint8_naive.default(X, W, dY, dx_lut, dw_lut)
+def bgemm_lre_backward_uint8_naive(
+        grad_output: Tensor, x: Tensor, w: Tensor,
+        dx_lut: Tensor, dw_lut: Tensor) -> tuple[Tensor, Tensor]:
+    return torch.ops.approxtorch.bgemm_lre_backward_uint8_naive.default(
+        grad_output, x, w, dx_lut, dw_lut)
 
-# def bgemm_custom_grad_int8_naive(X: Tensor, W: Tensor, dY: Tensor, dx_lut: Tensor, dw_lut: Tensor) -> Tensor:
-#     return torch.ops.approxtorch.bgemm_custom_grad_int8_naive.default(X, W, dY, dx_lut, dw_lut)
+
+def bgemm_custom_grad_uint8_naive(
+        X: Tensor, W: Tensor, dY: Tensor,
+        dx_lut: Tensor, dw_lut: Tensor) -> tuple[Tensor, Tensor]:
+    return torch.ops.approxtorch.bgemm_custom_grad_uint8_naive.default(
+        X, W, dY, dx_lut, dw_lut)
+
+def bgemm_custom_grad_int8_naive(
+        X: Tensor, W: Tensor, dY: Tensor,
+        dx_lut: Tensor, dw_lut: Tensor) -> tuple[Tensor, Tensor]:
+    return torch.ops.approxtorch.bgemm_custom_grad_int8_naive.default(
+        X, W, dY, dx_lut, dw_lut)
 
 # def bgemm_custom_grad_uint8(X: Tensor, W: Tensor, dY: Tensor, dx_lut: Tensor, dw_lut: Tensor) -> Tensor:
 #     return torch.ops.approxtorch.bgemm_custom_grad_uint8.default(X, W, dY, dx_lut, dw_lut)
