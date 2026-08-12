@@ -4,6 +4,6 @@
 from .Conv2d_int8 import Conv2d_int8
 from .Conv2d_uint8 import Conv2d_uint8   # uint8×uint8 非对称（static），目前仅 ste
 from . import bgemm_int8     # int8 对称：LUT-BGEMM / conv 级 Function（ste/lre/custom）
-from . import bgemm_uint8    # uint8×uint8 非对称：LUT-BGEMM（ste + 仅前向）
+from . import bgemm_uint8    # uint8×uint8 非对称：LUT-BGEMM（ste/lre/custom + 仅前向）
 from . import quantization   # 静态 int8/uint8 量化 + 权重 EMA per-channel 量化
 from . import naive          # 朴素算子实现，用作优化版的对比基线

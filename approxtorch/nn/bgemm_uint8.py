@@ -16,6 +16,14 @@ from torch.autograd import Function
 import approxtorch as at
 
 
+__all__ = [
+    "bgemm_uint8",
+    "bgemm_uint8_ste",
+    "bgemm_uint8_lre",
+    "bgemm_uint8_custom",
+]
+
+
 class _bgemm_uint8_base(Function):
 
     @staticmethod
@@ -42,12 +50,77 @@ def bgemm_uint8_ste(x, w, lut):
     return _bgemm_uint8_ste.apply(x, w, lut)
 
 
+class _bgemm_uint8_lre(_bgemm_uint8_base):
+    """BGEMM using one LRE slope for each raw uint8 operand value.
+
+    ``dx`` is indexed by the quantized weight when computing ``grad_x``;
+    ``dw`` is indexed by the quantized activation when computing ``grad_w``.
+    Both tables contain 256 float32 entries ordered by the raw uint8 value.
+    """
+
+    @staticmethod
+    def forward(ctx, x, w, lut, dx, dw):
+        y, xq, wq = at.backend.ops.bgemm_fake_uint8_claude_save(x, w, lut)
+        ctx.save_for_backward(xq, wq)
+        ctx.dx = dx
+        ctx.dw = dw
+        return y
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        xq, wq = ctx.saved_tensors
+        # The optimized LRE op uses matrix layout w[K,O], while the public
+        # BGEMM API uses w[O,K].  Its dtype-generic LUT mapping handles these
+        # saved uint8 index images directly (no signed offset is applied).
+        grad_x, grad_w = at.backend.ops.bgemm_lre_backward_claude(
+            grad_output=grad_output,
+            x=xq,
+            w=wq.transpose(0, 1).contiguous(),
+            dx=ctx.dx,
+            dw=ctx.dw,
+        )
+        return grad_x, grad_w.transpose(0, 1).contiguous(), None, None, None
+
+
+def bgemm_uint8_lre(x, w, lut, dx, dw):
+    return _bgemm_uint8_lre.apply(x, w, lut, dx, dw)
+
+
+class _bgemm_uint8_custom(Function):
+    """BGEMM with a custom derivative for every raw uint8 ``(x, w)`` pair.
+
+    ``dx_lut`` and ``dw_lut`` each contain 256 x 256 float32 entries in
+    row-major order.  Entry ``[x, w]`` is the surrogate derivative with
+    respect to the first or second LUT operand respectively.
+    """
+
+    @staticmethod
+    def forward(ctx, x, w, lut, dx_lut, dw_lut):
+        y, xq, wq = at.backend.ops.bgemm_fake_uint8_claude_save(x, w, lut)
+        ctx.save_for_backward(xq, wq, dx_lut, dw_lut)
+        return y
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        xq, wq, dx_lut, dw_lut = ctx.saved_tensors
+        grad_x = at.backend.ops.bgemm_custom_grad_uint8_dx(
+            xq, wq, grad_output, dx_lut)
+        grad_w = at.backend.ops.bgemm_custom_grad_uint8_dw(
+            xq, wq, grad_output, dw_lut)
+        return grad_x, grad_w, None, None, None
+
+
+def bgemm_uint8_custom(x, w, lut, dx_lut, dw_lut):
+    return _bgemm_uint8_custom.apply(x, w, lut, dx_lut, dw_lut)
+
+
 class _bgemm_uint8(_bgemm_uint8_base):
     # 仅前向（推理/测试用）：误反传时给出明确报错而不是静默错梯度
     @staticmethod
     def backward(ctx, grad_output):
         raise NotImplementedError(
-            "bgemm_uint8 is forward-only; use bgemm_uint8_ste for training")
+            "bgemm_uint8 is forward-only; use bgemm_uint8_ste, "
+            "bgemm_uint8_lre or bgemm_uint8_custom for training")
 
 
 def bgemm_uint8(x, w, lut):
