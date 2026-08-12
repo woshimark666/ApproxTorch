@@ -341,7 +341,6 @@ Whole step 1.02-3.1x (B64 C64 56^2: 2.2x, peak 1537 -> 273 MB; CIFAR:
 2.5-3.1x across runs, 250 -> 44 MB); unlike lre, 1x1 also gains (1.2x)
 because the old einsum path was unoptimized there. Same test matrix as
 lre: y bit-identical, grads 1e-7 rel vs the fp64 einsum-formula truth.
-bqsg64 is the only remaining unfold user in the module.
 
 ## depthwise conv (MobileNetV2) — dwconv_claude.cu (2026-06-11)
 

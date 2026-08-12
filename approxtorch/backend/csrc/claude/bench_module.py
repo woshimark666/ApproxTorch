@@ -15,8 +15,10 @@ def old_path(m, x):
     O, C, kH, kW = m.weight.shape
     xq = quantization.static_quantize_int8(
         x, m.scale_x, m.qmin, m.qmax)
-    w, s_w = quantization.dynamic_quantize_int8(
-        m.weight, ch_axis=0, bits=m.weight_bits)
+    qmax_w = 2 ** (m.weight_bits - 1) - 1
+    w = quantization.static_quantize_int8(
+        m.weight, m.scale_w, -qmax_w, qmax_w, ch_axis=0)
+    s_w = m.scale_w
     if m.kernel_size == (1, 1) and m.padding == (0, 0) and m.stride == (1, 1):
         xu = xq.flatten(2)
     else:

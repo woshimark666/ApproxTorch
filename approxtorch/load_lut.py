@@ -33,13 +33,6 @@ def load_lre_grad_lut(da_file_path, db_file_path):
     db_lut.requires_grad_(False)
     return da_lut, db_lut
 
-def load_bqsg64_coeff_lut(file_path):
-    coeff_lut = np.loadtxt(file_path, dtype=np.float32)
-    coeff_lut = torch.tensor(coeff_lut)
-    coeff_lut.requires_grad_(False)
-    return coeff_lut
-
-    
 def load_half_custom_grad_lut(file_path):
     # dL/dx use STE
     # only need dL/dw grad lut
@@ -50,10 +43,13 @@ def load_half_custom_grad_lut(file_path):
     return grad_lut_dy
 
 def load_custom_grad_lut(dx_file_path, dw_file_path):
+    """Load pair-wise custom gradients indexed as ``[x + 128, w + 128]``."""
     dx_lut = np.loadtxt(dx_file_path, dtype=np.float32)
     dw_lut = np.loadtxt(dw_file_path, dtype=np.float32)
     dx_lut = torch.tensor(dx_lut)
     dw_lut = torch.tensor(dw_lut)
     dx_lut = dx_lut.view(-1)
     dw_lut = dw_lut.view(-1)
+    dx_lut.requires_grad_(False)
+    dw_lut.requires_grad_(False)
     return dx_lut, dw_lut

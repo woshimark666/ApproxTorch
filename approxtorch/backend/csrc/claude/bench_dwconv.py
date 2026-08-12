@@ -82,6 +82,7 @@ def swap(module):
                             groups=child.groups)
             with torch.no_grad():
                 q.weight.copy_(child.weight)
+                q._reset_scale_w_from_weight()
                 if child.bias is not None:
                     q.bias.copy_(child.bias)
             setattr(module, name, q)

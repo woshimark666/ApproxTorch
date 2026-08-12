@@ -1,16 +1,12 @@
 import torch
-import torch.nn as nn
 from torch.autograd import Function
 import approxtorch as at
 
 class _bgemm_int8_base(Function):
 
     @staticmethod
-    def forward(ctx, x, w, lut, dx, dw, coeff):
+    def forward(ctx, x, w, lut):
         ctx.save_for_backward(x, w)
-        ctx.dx = dx
-        ctx.dw = dw
-        ctx.coeff = coeff
 
         return at.backend.ops.bgemm_fake_int8_claude(x, w, lut)
 
@@ -22,11 +18,11 @@ class _bgemm_int8_ste(_bgemm_int8_base):
         x, w = ctx.saved_tensors
         grad_x = torch.einsum("nol,ok->nkl", grad_output, w)
         grad_w = torch.einsum("nol,nkl->ok", grad_output, x)
-        return grad_x, grad_w, None, None, None, None
+        return grad_x, grad_w, None
 
 
 def bgemm_int8_ste(x, w, lut):
-    return _bgemm_int8_ste.apply(x, w, lut, None, None, None)
+    return _bgemm_int8_ste.apply(x, w, lut)
 
 
 
@@ -54,6 +50,77 @@ class _bgemm_int8_lre(_bgemm_int8_base):
 
 def bgemm_int8_lre(x, w, lut, dx, dw):
     return _bgemm_int8_lre.apply(x, w, lut, dx, dw)
+
+
+class _bgemm_int8_custom(Function):
+    """BGEMM with one custom derivative for every quantized ``(x, w)`` pair.
+
+    ``dx_lut`` and ``dw_lut`` both contain 256 x 256 entries in row-major
+    order.  Entry ``[x + 128, w + 128]`` is respectively the surrogate
+    derivative of the LUT multiplier with respect to x and w.
+
+    The forward kernel saves uint8 LUT indices rather than signed values, so
+    the uint8 custom-gradient kernels index the same tables directly without
+    an extra conversion.
+    """
+
+    @staticmethod
+    def forward(ctx, x, w, lut, dx_lut, dw_lut):
+        y, xq, wq = at.backend.ops.bgemm_fake_int8_claude_save(x, w, lut)
+        ctx.save_for_backward(xq, wq, dx_lut, dw_lut)
+        return y
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        xq, wq, dx_lut, dw_lut = ctx.saved_tensors
+        grad_x = at.backend.ops.bgemm_custom_grad_uint8_dx(
+            xq, wq, grad_output, dx_lut)
+        grad_w = at.backend.ops.bgemm_custom_grad_uint8_dw(
+            xq, wq, grad_output, dw_lut)
+        return grad_x, grad_w, None, None, None
+
+
+def bgemm_int8_custom(x, w, lut, dx_lut, dw_lut):
+    return _bgemm_int8_custom.apply(x, w, lut, dx_lut, dw_lut)
+
+
+class _conv2d_int8_custom(Function):
+    """Conv2d wrapper for the pair-wise custom-gradient BGEMM kernels."""
+
+    @staticmethod
+    def forward(ctx, x, w, lut, dx_lut, dw_lut, geom):
+        kernel_size, stride, padding, dilation, groups = geom
+        if groups != 1:
+            raise NotImplementedError(
+                "custom gradient currently supports only groups=1")
+
+        xq8 = x.detach().to(torch.int8)
+        xu8 = at.backend.ops.im2col_u8(
+            xq8, kernel_size, stride, padding, dilation)
+        y, xq, wq = at.backend.ops.bgemm_fake_int8_claude_save(xu8, w, lut)
+        ctx.save_for_backward(xq, wq, dx_lut, dw_lut)
+        ctx.input_shape = tuple(x.shape)
+        ctx.geom = geom
+        return y
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        xq, wq, dx_lut, dw_lut = ctx.saved_tensors
+        (kh, kw), (sh, sw), (ph, pw), (dilh, dilw), _ = ctx.geom
+        _, _, height, width = ctx.input_shape
+
+        grad_x_col = at.backend.ops.bgemm_custom_grad_uint8_dx(
+            xq, wq, grad_output, dx_lut)
+        grad_w = at.backend.ops.bgemm_custom_grad_uint8_dw(
+            xq, wq, grad_output, dw_lut)
+        grad_x = torch.nn.functional.fold(
+            grad_x_col, (height, width), (kh, kw),
+            dilation=(dilh, dilw), padding=(ph, pw), stride=(sh, sw))
+        return grad_x, grad_w, None, None, None, None
+
+
+def conv2d_int8_custom(x, w, lut, dx_lut, dw_lut, geom):
+    return _conv2d_int8_custom.apply(x, w, lut, dx_lut, dw_lut, geom)
 
 
 class _conv2d_int8_lre(Function):
@@ -229,18 +296,3 @@ class _conv2d_int8_ste(Function):
 
 def conv2d_int8_ste(x, w, lut, geom):
     return _conv2d_int8_ste.apply(x, w, lut, geom)
-
-
-class _bgemm_int8_bqsg64(_bgemm_int8_base):
-
-    @staticmethod
-    def backward(ctx, grad_outputs):
-        x, w = ctx.saved_tensors
-        coeff = ctx.coeff
-
-        grad_x, grad_w = at.backend.ops.bgemm_bqsg64_backward(grad_outputs, x, w, coeff)
-
-        return grad_x, grad_w, None, None, None, None
-
-def bgemm_int8_bqsg64(x, w, lut, coeff):
-    return _bgemm_int8_bqsg64.apply(x, w, lut, None, None, coeff)

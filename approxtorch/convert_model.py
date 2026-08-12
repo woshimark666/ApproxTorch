@@ -1,9 +1,8 @@
 import torch
 import torch.nn as nn
-# 旧实现（Conv2d_uint8 / 旧 Conv2d_int8 / gradual / BQSG64_float）已移入
+# 旧实现（Conv2d_uint8 / 旧 Conv2d_int8 / gradual）已移入
 # approxtorch/nn/deprecated/，不再可从包导入；本文件只保留 decoupled 路径。
 from approxtorch.nn import Conv2d_int8
-from typing import Literal
 
 # this function convert the model into approximate model
 
@@ -15,14 +14,11 @@ def to_qat_int8(
         grad: str = 'ste',
         dx: torch.Tensor | None = None,
         dw: torch.Tensor | None = None,
-        coefficient: torch.Tensor | None = None,
         conv_only: bool = True,
         ignore_first_conv: bool = True,
         scale_momentum: float = 0.05,
-        decoupled: bool = False,
-        weight_bits: int = 8,
-        trunc_bits: int = 0,  # n: 近似乘法器截断权重操作数的低位数（0=off，仅 decoupled 路径生效）
-        w_scale_mode: str = 'dynamic'  # 权重 scale: 'dynamic'=每步 absmax / 'ema'=校准+EMA（仅 decoupled）
+        decoupled: bool = True,
+        weight_bits: int = 8
         ):
     
     modules_to_replace = []
@@ -46,39 +42,33 @@ def to_qat_int8(
 
 
 
-            if grad == 'bqsg64_float':
-                raise NotImplementedError(
-                    "Conv2d_int8_BQSG64_float 已移入 approxtorch/nn/deprecated/，"
-                    "不再从包导出；如需使用请从 deprecated 目录恢复")
-            else:
-                if decoupled:
-                    new_module = Conv2d_int8(
-                        in_channels = in_channels,
-                        out_channels = out_channels,
-                        kernel_size = kernel_size,
-                        lut = lut,
-                        x_quantizer = x_quantizer,
-                        w_quantizer = w_quantizer,
-                        grad = grad,
-                        dx = dx,
-                        dw = dw,
-                        coefficient = coefficient,
-                        bias = bias,
-                        stride = stride,
-                        padding = padding,
-                        dilation = dilation,
-                        groups = groups,
-                        update_scale = True,
-                        scale_momentum = scale_momentum,
-                        weight_bits = weight_bits,
-                        trunc_bits = trunc_bits,
-                        w_scale_mode = w_scale_mode
+            if decoupled:
+                new_module = Conv2d_int8(
+                    in_channels=in_channels,
+                    out_channels=out_channels,
+                    kernel_size=kernel_size,
+                    lut=lut,
+                    x_quantizer=x_quantizer,
+                    w_quantizer=w_quantizer,
+                    grad=grad,
+                    dx=dx,
+                    dw=dw,
+                    bias=bias,
+                    stride=stride,
+                    padding=padding,
+                    dilation=dilation,
+                    groups=groups,
+                    update_scale=True,
+                    scale_momentum=scale_momentum,
+                    weight_bits=weight_bits,
                 )
-
-                else:
-                    raise NotImplementedError(
-                        "非 decoupled 的旧 Conv2d_int8 已移入 approxtorch/nn/deprecated/"
-                        "（Conv2d_int8_v2.py）；请改用 to_qat_int8(..., decoupled=True)")
+                with torch.no_grad():
+                    new_module.weight.copy_(module.weight)
+                    new_module._reset_scale_w_from_weight()
+            else:
+                raise NotImplementedError(
+                    "非 decoupled 的旧 Conv2d_int8 已移入 approxtorch/nn/deprecated/"
+                    "（Conv2d_int8_v2.py）；请改用 to_qat_int8(..., decoupled=True)")
             
             modules_to_replace.append((name, new_module))
 
@@ -108,4 +98,3 @@ def convert_model(model,
     raise NotImplementedError(
         "convert_model 的旧实现已废弃（Conv2d_uint8 / 旧 Conv2d_int8 移入 "
         "approxtorch/nn/deprecated/）；请改用 to_qat_int8(..., decoupled=True)")
-

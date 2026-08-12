@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 
-def calibrate_int8(model, data_loader, num_pictures, save_path):
+def calibrate_int8(model, data_loader, num_pictures, save_path, weight_bits=8):
     """
     对 CNN 进行 min-max (absmax) 校准,生成 INT8 量化 scale。
     - 跳过第一个 Conv2d 层
@@ -11,6 +11,8 @@ def calibrate_int8(model, data_loader, num_pictures, save_path):
     - 权重: per-channel absmax (沿输出通道 O)
     - scale_x: 激活 scale, scale_w: 权重 scale (shape = (O,))
     """
+    if not 3 <= weight_bits <= 8:
+        raise ValueError(f"weight_bits must be between 3 and 8, got {weight_bits}")
     model.eval()
     device = next(model.parameters()).device
 
@@ -39,6 +41,7 @@ def calibrate_int8(model, data_loader, num_pictures, save_path):
                 absmax_record[layer_name] = cur
         return hook
 
+    qmax_w = 2 ** (weight_bits - 1) - 1
     for name, module in target_layers.items():
         hooks.append(module.register_forward_hook(make_hook(name)))
 
@@ -71,7 +74,7 @@ def calibrate_int8(model, data_loader, num_pictures, save_path):
         # Linear: (O, I)         -> reduce over (1,)
         reduce_dims = tuple(range(1, w.dim()))
         absmax_per_oc = w.abs().amax(dim=reduce_dims)        # shape: (O,)
-        scale_w = absmax_per_oc / 127.0
+        scale_w = absmax_per_oc / qmax_w
         scale_w = torch.where(scale_w > 0, scale_w, torch.ones_like(scale_w))
         scale_w_dict[name] = scale_w
         print(f"[scale_w] {name}: shape={tuple(scale_w.shape)}, "

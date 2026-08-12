@@ -33,8 +33,10 @@ def old_path(m, x):
     O, C, kH, kW = m.weight.shape
     xq = quantization.static_quantize_int8(
         x, m.scale_x, m.qmin, m.qmax)
-    w, s_w = quantization.dynamic_quantize_int8(
-        m.weight, ch_axis=0, bits=m.weight_bits)
+    qmax_w = 2 ** (m.weight_bits - 1) - 1
+    w = quantization.static_quantize_int8(
+        m.weight, m.scale_w, -qmax_w, qmax_w, ch_axis=0)
+    s_w = m.scale_w
     xu = F.unfold(xq, m.kernel_size, dilation=m.dilation,
                   padding=m.padding, stride=m.stride)
     if m.grad == 'ste':
@@ -67,8 +69,7 @@ def fp64_grads(m, x, go):
         xmask = (xs >= m.qmin) & (xs <= m.qmax)
         xq = torch.clamp(torch.round(xs), m.qmin, m.qmax)
         qmaxw = 2 ** (m.weight_bits - 1) - 1
-        absmax = m.weight.detach().abs().amax(dim=(1, 2, 3))
-        s_w = (absmax / qmaxw).clamp(min=1e-12)
+        s_w = m.scale_w
         ws = m.weight / s_w.view(-1, 1, 1, 1)
         wmask = (ws >= -qmaxw) & (ws <= qmaxw)
         wq = torch.clamp(torch.round(ws), -qmaxw, qmaxw)
@@ -273,8 +274,7 @@ def fp64_grads_dw(m, x, go):
         xmask = (xs >= m.qmin) & (xs <= m.qmax)
         xq = torch.clamp(torch.round(xs), m.qmin, m.qmax)
         qmaxw = 2 ** (m.weight_bits - 1) - 1
-        absmax = m.weight.detach().abs().amax(dim=(1, 2, 3))
-        s_w = (absmax / qmaxw).clamp(min=1e-12)
+        s_w = m.scale_w
         ws = m.weight / s_w.view(-1, 1, 1, 1)
         wmask = (ws >= -qmaxw) & (ws <= qmaxw)
         wq = torch.clamp(torch.round(ws), -qmaxw, qmaxw)
@@ -328,8 +328,10 @@ def check_dw(tag, B, C, H, W, k, s=1, p=0, d=1, bias=True, mode='lre'):
     with torch.no_grad():
         xqr = quantization.static_quantize_int8(
             x0, m.scale_x, m.qmin, m.qmax)
-        wr, s_wr = quantization.dynamic_quantize_int8(
-            m.weight, ch_axis=0, bits=m.weight_bits)
+        qmax_w = 2 ** (m.weight_bits - 1) - 1
+        wr = quantization.static_quantize_int8(
+            m.weight, m.scale_w, -qmax_w, qmax_w, ch_axis=0)
+        s_wr = m.scale_w
         yr = dw_ref_y(xqr, wr.view(C, -1), m.lut, m.kernel_size,
                       m.stride, m.padding, m.dilation)
         yr = yr.view_as(y_new)

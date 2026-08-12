@@ -66,9 +66,10 @@ def make_module(C, O, k, s, p, d, g, mode, lut, dx=None, dw=None, bias=True):
 def chain(m, x):
     xq = quantization.static_quantize_int8(
         x, m.scale_x, m.qmin, m.qmax)
-    wq, s_w = quantization.dynamic_quantize_int8(
-        m.weight, ch_axis=0, bits=m.weight_bits)
-    return xq, wq, s_w
+    qmax_w = 2 ** (m.weight_bits - 1) - 1
+    wq = quantization.static_quantize_int8(
+        m.weight, m.scale_w, -qmax_w, qmax_w, ch_axis=0)
+    return xq, wq, m.scale_w
 
 
 def dequant(m, y_raw, s_w):
@@ -314,6 +315,7 @@ for mode in ('lre', 'ste'):
                                 groups=ch.groups)
                 with torch.no_grad():
                     q.weight.copy_(ch.weight)
+                    q._reset_scale_w_from_weight()
                 setattr(mod, name, q)
             else:
                 swap(ch)

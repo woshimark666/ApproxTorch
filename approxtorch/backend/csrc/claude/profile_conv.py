@@ -76,7 +76,9 @@ for (B, C, H, O, k, s, p) in shapes:
         t['0b vector_norm inf    '] = evtime(lambda: torch.linalg.vector_norm(x0, torch.inf))
         xq = at.nn.quantization.static_quantize_int8(x0, m.scale_x, -127, 127)
         t['1 fakequant x (fused) '] = evtime(lambda: torch.ops.approxtorch.fakequant_per_tensor_claude.default(x0, m.scale_x, -127, 127))
-        t['2 fakequant w (python)'] = evtime(lambda: at.nn.quantization.dynamic_quantize_int8(m.weight, ch_axis=0))
+        qmax_w = 2 ** (m.weight_bits - 1) - 1
+        t['2 fakequant w (python)'] = evtime(lambda: at.nn.quantization.static_quantize_int8(
+            m.weight, m.scale_w, -qmax_w, qmax_w, ch_axis=0))
         t['3 xq_pre cast .to(i8) '] = evtime(lambda: xq.detach().to(torch.int8))
         if k != 1:
             t['4 unfold fp32         '] = evtime(lambda: F.unfold(xq, (k, k), padding=p, stride=s))
@@ -87,7 +89,9 @@ for (B, C, H, O, k, s, p) in shapes:
             except Exception as ex:
                 print('   unfold int8 unsupported:', type(ex).__name__, str(ex)[:80])
         xu = F.unfold(xq, (k, k), padding=p, stride=s) if k != 1 else xq.flatten(2)
-        wq, sw = at.nn.quantization.dynamic_quantize_int8(m.weight, ch_axis=0)
+        wq = at.nn.quantization.static_quantize_int8(
+            m.weight, m.scale_w, -qmax_w, qmax_w, ch_axis=0)
+        sw = m.scale_w
         wf = wq.view(O, -1)
         t['5 bgemm fwd (no save) '] = evtime(lambda: at.backend.ops.bgemm_fake_int8_claude(xu, wf, lut))
         t['5b bgemm fwd (_save)  '] = evtime(lambda: at.backend.ops.bgemm_fake_int8_claude_save(xu, wf, lut))

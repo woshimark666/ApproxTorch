@@ -21,7 +21,10 @@ __all__ = ['im2col_int8',
            'bgemm_lre_backward_uint8_naive',
            'bgemm_custom_grad_int8_naive',
            'bgemm_custom_grad_uint8_naive',
-           'bgemm_gradual_approx_int8']
+           'bgemm_custom_grad_int8_dx',
+           'bgemm_custom_grad_int8_dw',
+           'bgemm_custom_grad_uint8_dx',
+           'bgemm_custom_grad_uint8_dw']
 
 def im2col_int8(feature: Tensor, kernel_size, stride=1, padding=0, dilation=1) -> Tensor:
     kernel_size = _pair(kernel_size)
@@ -269,15 +272,6 @@ def bgemm_lre_backward_claude_im2col(grad_output: Tensor, x: Tensor, w: Tensor,
     dilh, dilw = _pair(dilation)
     return torch.ops.approxtorch.bgemm_lre_backward_claude_im2col.default(
         grad_output, x, w, dx, dw, kh, kw, sh, sw, ph, pw, dilh, dilw)
-
-
-# bqsg64 with int(fake) x and w  
-def bgemm_bqsg64_backward(grad_output: Tensor, x: Tensor, w: Tensor, coeff_deriv: Tensor ) -> tuple[Tensor, Tensor]:
-    return torch.ops.approxtorch.bgemm_bqsg64_backward.default(grad_output, x, w, coeff_deriv)
-
-# bqsg64 with float x and w
-def bgemm_bqsg64_float_backward(grad_output: Tensor, x: Tensor, w: Tensor, coeff_deriv: Tensor, s_x: Tensor, s_w: Tensor) -> tuple[Tensor, Tensor]:
-    return torch.ops.approxtorch.bgemm_bqsg64_float_backward.default(grad_output, x, w, coeff_deriv, s_x, s_w)
 
 
 def elementwise_mul(a: Tensor, b: Tensor, lut: Tensor) -> Tensor:
