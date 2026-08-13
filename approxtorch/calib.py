@@ -157,7 +157,7 @@ def calibrate_uint8(
         num_pictures: 最多使用的样本数；``None`` 表示遍历完整个迭代器。
         save_path: 非 ``None`` 时保存增强后的 ``state_dict``。
         ignore_first_conv: 是否跳过网络中的第一个 ``nn.Conv2d``，默认与
-            ``to_qat_int8`` 的项目约定一致。
+            ``convert_model`` 的项目约定一致。
 
     Returns:
         包含原模型参数和 uint8 校准参数的 ``state_dict``。

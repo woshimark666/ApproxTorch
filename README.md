@@ -20,8 +20,8 @@ Because the simulation is purely LUT-driven, **any 8-bit (signed or unsigned) ap
   - **STE** — straight-through estimator (default)
   - **LRE** — linear-regression-estimated gradient LUTs
   - **Custom** — one derivative for every quantized `(x, w)` pair
-- ⚖️ **EMA quantization**: per-tensor activation scale and per-channel weight scale are EMA-updated during training, with arbitrary weight bit-width (**3–8 bit**) in the decoupled layer.
-- 🔌 **One-line model conversion**: `at.to_qat_int8(model, lut)` swaps every `nn.Conv2d` for an approximate one.
+- ⚖️ **EMA quantization**: per-tensor activation scale and per-channel weight scale are EMA-updated during training, with arbitrary weight bit-width (**3–8 bit**) for int8 weights.
+- 🔌 **One-line model conversion**: `at.convert_model(model, lut)` replaces selected `nn.Conv2d` layers with approximate layers.
 - 🖥️ **Multi-GPU (DDP) support**: activation scales are synchronized across ranks automatically.
 
 ## Requirements
@@ -78,12 +78,12 @@ lut = at.load_lut.load_lut('test/exact_int8.txt', qtype='int8').to(
 
 # 2. take any FP32 model and replace its Conv2d layers with approximate ones
 model = resnet18(num_classes=10)
-model = at.to_qat_int8(
+model = at.convert_model(
     model, lut,
+    qtype='int8',             # 'int8' | 'uint8'
     grad='ste',               # gradient estimator: 'ste' | 'lre' | 'custom'
-    conv_only=True,           # only convert Conv2d layers
     ignore_first_conv=True,   # keep the first conv exact (common QAT practice)
-    weight_bits=8,            # weight quantization bit-width, 3–8
+    weight_bits=8,            # 3–8 for int8; uint8 is fixed at 8
 ).to(device)
 
 # 3. business as usual — training and inference work like any PyTorch model
@@ -111,7 +111,7 @@ import approxtorch as at
 # LRE: per-row / per-column linear regression slopes
 grad_a, grad_b = at.grad_lut.lre('my_multiplier.txt', qtype='int8', save_path='my_mult')
 dx, dw = at.load_lut.load_lre_grad_lut('my_mult_lre_grad_a.txt', 'my_mult_lre_grad_b.txt')
-model = at.to_qat_int8(model, lut, grad='lre', dx=dx.cuda(), dw=dw.cuda())
+model = at.convert_model(model, lut, grad='lre', dx=dx.cuda(), dw=dw.cuda())
 ```
 
 For a pair-wise custom gradient, `dx[x + 128, w + 128]` supplies the
@@ -120,7 +120,7 @@ derivative with respect to `w`:
 
 ```python
 dx, dw = at.load_lut.load_custom_grad_lut('custom_dx.txt', 'custom_dw.txt')
-model = at.to_qat_int8(
+model = at.convert_model(
     model, lut, grad='custom',
     dx=dx.cuda(), dw=dw.cuda(),
 )
@@ -133,18 +133,16 @@ A smoothing + central-difference method (`at.grad_lut.DATE`) is also included fo
 ### Model conversion
 
 ```python
-at.to_qat_int8(
+at.convert_model(
     model,                    # any nn.Module
     lut,                      # LUT tensor from at.load_lut.load_lut(...)
-    x_quantizer='symmetric',  # activation quantizer
-    w_quantizer='symmetric',  # weight quantizer
+    qtype='int8',             # 'int8' | 'uint8'
     grad='ste',               # 'ste' | 'lre' | 'custom'
     dx=None, dw=None,         # gradient LUTs, required for 'lre'/'custom'
-    conv_only=True,
     ignore_first_conv=True,   # leave the first Conv2d untouched
-    scale_momentum=0.05,      # EMA momentum for activation scale updates
-    decoupled=True,           # current maintained Conv2d_int8 path
-    weight_bits=8,            # 3–8 bit weight quantization (decoupled layer)
+    scale_momentum=0.05,      # EMA momentum for quantization statistics
+    update_scale=True,        # update statistics while training
+    weight_bits=8,            # 3–8 for int8; uint8 is fixed at 8
 )
 ```
 
@@ -154,8 +152,6 @@ Approximate layers can also be used directly, just like their `torch.nn` counter
 
 - `Conv2d_int8` — signed 8-bit approximate convolution
 - `Conv2d_uint8` — unsigned 8-bit approximate convolution
-- `Conv2d_BN_int8` — convolution with BatchNorm folding
-- `Conv2d_gradual_int8` — gradual (blended exact/approximate) convolution for smoother QAT
 
 ### Calibration (`approxtorch.calib`)
 
@@ -167,7 +163,7 @@ at.calib.calibrate_int8(model, train_loader, num_pictures=1024,
 ```
 
 Calibration writes the activation scale and the EMA weight scale into module
-buffers, so they are saved together with the model checkpoint.
+buffers, so they can be loaded after model conversion.
 
 ### Low-level ops (`approxtorch.backend.ops`)
 
@@ -181,8 +177,8 @@ approxtorch/
 │   └── csrc/
 │       ├── cuda/       # approximate (b)gemm, im2col, LUT lookup, backward kernels
 │       └── cpu/        # CPU reference implementations
-├── nn/                 # approximate Conv2d layers (int8 / uint8 / BN-fused / gradual)
-├── convert_model.py    # to_qat_int8 / convert_model — one-line model conversion
+├── nn/                 # maintained approximate Conv2d layers (int8 / uint8)
+├── convert_model.py    # unified int8 / uint8 model conversion
 ├── load_lut.py         # LUT and gradient-LUT loaders
 ├── grad_lut.py         # gradient LUT generation (LRE, DATE)
 ├── quant_utils.py      # calibration utilities

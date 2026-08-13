@@ -12,12 +12,10 @@ class Conv2d_int8(nn.Module):
                  out_channels: int,
                  kernel_size: int | tuple[int, int],
                  lut: torch.Tensor,
-                 x_quantizer:str = 'symmetric',
-                 w_quantizer:str = 'symmetric',
                  grad: str = 'ste',
                  dx: torch.Tensor | None = None,
                  dw: torch.Tensor | None = None,
-                 bias: torch.Tensor | None = None,
+                 bias: torch.Tensor | bool | None = None,
                  stride: int | tuple[int, int] = 1,
                  padding: int | tuple[int, int] = 0,
                  dilation: int | tuple[int, int] = 1,
@@ -42,10 +40,6 @@ class Conv2d_int8(nn.Module):
                 f"(groups == in_channels == out_channels), got groups={groups}, "
                 f"in={in_channels}, out={out_channels}")
         self.groups = groups
-        self.x_quantizer = x_quantizer
-        self.w_quantizer = w_quantizer
-        if w_quantizer != 'symmetric':
-            raise ValueError("Only symmetric weight quantization is supported")
         if grad not in ('ste', 'lre', 'custom'):
             raise ValueError(f"grad must be 'ste', 'lre' or 'custom', got {grad}")
         if grad == 'custom' and groups != 1:
@@ -70,14 +64,7 @@ class Conv2d_int8(nn.Module):
                                                self.in_channels // self.groups,
                                                self.kernel_size[0], self.kernel_size[1]))
         # quantization parameters
-        match x_quantizer:
-            case 'symmetric':
-                self.register_buffer('scale_x', torch.tensor(1.0))
-                self.zero_x = None  # 占个位置 没用
-            case 'asymmetric':
-                raise NotImplementedError("asymmetric quantization for x is not implemented yet")
-            case _:
-                raise ValueError("Invalid quantization method for x")
+        self.register_buffer('scale_x', torch.tensor(1.0))
 
         # EMA 权重 scale：语义与 calib.py 的 scale_w 一致（absmax/qmax 的传统
         # dequant scale，per-channel [O]），因此校准 checkpoint 里的
@@ -139,8 +126,7 @@ class Conv2d_int8(nn.Module):
     def __repr__(self):
         return f"Conv2d_int8(in_channels={self.in_channels}, out_channels={self.out_channels}, kernel_size={self.kernel_size}, "\
                 f"stride={self.stride}, padding={self.padding}, dilation={self.dilation}, groups={self.groups}, " \
-                f"x_quantizer={self.x_quantizer}, w_quantizer={self.w_quantizer}, grad={self.grad}, " \
-                f"weight_bits={self.weight_bits})"
+                f"grad={self.grad}, weight_bits={self.weight_bits})"
     
 
     def unfreeze_scale(self):

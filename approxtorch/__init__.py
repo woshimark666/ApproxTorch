@@ -13,7 +13,7 @@ from . import backend
 from . import nn
 # quant_utils 依赖已移入 nn/deprecated/ 的旧 Conv 类（校准请用 calib.py）
 # from . import quant_utils
-from .convert_model import to_qat_int8, convert_model
+from .convert_model import convert_model
 from . import load_lut
 from . import grad_lut
 from . import calib
