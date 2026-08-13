@@ -39,18 +39,22 @@ class Conv2d_uint8(nn.Module):
     # 列和）。padding 注入 z_x（真实 0 的量化像），使修正式对含 padding
     # 的位置同样成立（padded tap 的 (q_x−z_x) 恰为 0）。
     #
-    # 修正项全部用可微 torch op 写出，于是 bgemm 的 STE backward 只需给
-    # 原始乘积的梯度（见 bgemm_uint8.py），autograd 自动合成
-    # dy/dq_x = s·(q_w−z_w)、dy/dq_w = s·(q_x−z_x)。
+    # 修正项全部用可微 torch op 写出，于是 bgemm 的 backward 只需给原始
+    # LUT 乘积的 surrogate gradient（见 bgemm_uint8.py）；autograd 会再补上
+    # 零点项。以 STE 为例，最终合成为
+    # dy/dq_x = s·(q_w−z_w)、dy/dq_w = s·(q_x−z_x)。LRE/custom 同理，
+    # 分别得到 s·(dx[q_w]−z_w) 和 s·(dw[q_x]−z_x)，或对应的 pair-wise
+    # derivative 减零点。
     #
-    # 目前仅 grad='ste'、groups=1；im2col 走 torch unfold（fp32），
-    # conv 级 u8 融合路径与 lre 等后续再加。
+    # 目前支持 ste/lre/custom、groups=1；depthwise 后续再加。
     def __init__(self,
                  in_channels: int,
                  out_channels: int,
                  kernel_size: int | tuple[int, int],
                  lut: torch.Tensor,
                  grad: str = 'ste',
+                 dx: torch.Tensor | None = None,
+                 dw: torch.Tensor | None = None,
                  bias: torch.Tensor | bool | None = None,
                  stride: int | tuple[int, int] = 1,
                  padding: int | tuple[int, int] = 0,
@@ -71,12 +75,14 @@ class Conv2d_uint8(nn.Module):
             raise NotImplementedError(
                 f"Conv2d_uint8 only supports groups=1 for now, got groups={groups}")
         self.groups = groups
-        if grad != 'ste':
-            raise NotImplementedError(
-                f"Conv2d_uint8 only supports grad='ste' for now, got grad='{grad}'")
+        if grad not in ('ste', 'lre', 'custom'):
+            raise ValueError(f"grad must be 'ste', 'lre' or 'custom', got {grad}")
         self.grad = grad
         self.qmin = 0
         self.qmax = 255
+        if not 0.0 <= scale_momentum <= 1.0:
+            raise ValueError(
+                f"scale_momentum must be between 0 and 1, got {scale_momentum}")
         self.scale_momentum = scale_momentum
         self.update_scale = update_scale
 
@@ -117,6 +123,36 @@ class Conv2d_uint8(nn.Module):
                 raise ValueError(f"bias must have shape ({self.out_channels},), got {tuple(bias.shape)}")
             with torch.no_grad():
                 self.bias.copy_(bias)
+
+        match grad:
+            case 'ste':
+                pass
+            case 'lre':
+                if dx is None or dw is None:
+                    raise ValueError("dx and dw are required when grad='lre'")
+                if not isinstance(dx, torch.Tensor) or not isinstance(dw, torch.Tensor):
+                    raise TypeError("lre dx and dw must be torch.Tensor objects")
+                if dx.numel() != 256 or dw.numel() != 256:
+                    raise ValueError(
+                        "lre dx and dw must each have 256 elements, indexed by "
+                        "the raw uint8 operand value")
+                if dx.dtype != torch.float32 or dw.dtype != torch.float32:
+                    raise TypeError("lre dx and dw must have dtype torch.float32")
+                self.register_buffer('dx', dx.contiguous().view(-1))
+                self.register_buffer('dw', dw.contiguous().view(-1))
+            case 'custom':
+                if dx is None or dw is None:
+                    raise ValueError("dx and dw are required when grad='custom'")
+                if not isinstance(dx, torch.Tensor) or not isinstance(dw, torch.Tensor):
+                    raise TypeError("custom dx and dw must be torch.Tensor objects")
+                if dx.numel() != 256 * 256 or dw.numel() != 256 * 256:
+                    raise ValueError(
+                        "custom dx and dw must each have 65536 elements for "
+                        "grad_lut[x][w]")
+                if dx.dtype != torch.float32 or dw.dtype != torch.float32:
+                    raise TypeError("custom dx and dw must have dtype torch.float32")
+                self.register_buffer('dx', dx.contiguous().view(-1))
+                self.register_buffer('dw', dw.contiguous().view(-1))
 
     def reset_parameters(self):
         # 与 nn.Conv2d 相同的默认初始化
@@ -200,10 +236,18 @@ class Conv2d_uint8(nn.Module):
                           padding=0, stride=self.stride)         # (B, K, L)
         wu = wq.view(O, -1)                                      # (O, K)
 
-        # 3. LUT-BGEMM（原始 uint8 值的近似乘积和）
-        y = bgemm_uint8.bgemm_uint8_ste(xu, wu, self.lut)        # (B, O, L)
+        # 3. LUT-BGEMM（原始 uint8 值的近似乘积和）。三种 backward 都只
+        #    负责 LUTSUM 的导数；下面可微的零点修正会由 autograd 自动相加。
+        if self.grad == 'lre':
+            y = bgemm_uint8.bgemm_uint8_lre(
+                xu, wu, self.lut, self.dx, self.dw)
+        elif self.grad == 'custom':
+            y = bgemm_uint8.bgemm_uint8_custom(
+                xu, wu, self.lut, self.dx, self.dw)
+        else:
+            y = bgemm_uint8.bgemm_uint8_ste(xu, wu, self.lut)    # (B, O, L)
 
-        # 4. 零点修正（可微：xsum/wsum 的梯度给 STE 反传补上 -z 项）
+        # 4. 零点修正（可微：xsum/wsum 的梯度给三种反传补上 -z 项）
         #    Σ(q_x−z_x)(q_w−z_w) = LUTSUM − z_w·Σq_x − z_x·Σq_w + K·z_x·z_w
         Kdim = wu.shape[1]
         xsum = xu.sum(dim=1)                                     # (B, L)

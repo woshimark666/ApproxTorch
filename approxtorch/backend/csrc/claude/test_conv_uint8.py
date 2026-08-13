@@ -1,5 +1,6 @@
 # Correctness tests for Conv2d_uint8 (uint8 x uint8 multiplier, static
-# asymmetric quantization: per-tensor activation, per-channel weight; ste).
+# asymmetric quantization: per-tensor activation, per-channel weight;
+# ste/lre/custom backward).
 #
 #  A. exact-product LUT (lut[a][b] = a*b): module forward must equal a
 #     centered integer conv F.conv2d((q_x - z_x), (q_w - z_w)) BITWISE
@@ -12,6 +13,8 @@
 #  D. eval/no-grad forward bit-identical to the training-mode values
 #  E. EMA min/max buffer updates move with data; freeze_scale stops them
 #  F. learning smoke: single layer overfits a fixed target (loss drops)
+#  G. LRE/custom exact-product derivatives plus zero-point corrections equal
+#     the centered fake-quant Conv2d surrogate
 #
 # geometry sweep: 1x1 fast path (flatten / stride slice / +padding), 3x3,
 # stride 2, dilation 2, 5x5, rectangular kernel+padding with H != W,
@@ -175,6 +178,60 @@ y_int = F.conv2d((xq - z_x).double(), (wq - z_w.view(-1, 1, 1, 1)).double(),
                  None, m.stride, m.padding, m.dilation)
 report(torch.equal(y, dequant_like_module(m, y_int.float(), s_x, s_w)),
        'A exact-lut fwd  ReLU data (z_x = 0)')
+
+# ------------------------------------------------------------------------ G
+# For the raw exact-product LUT f(a,b)=a*b, both LRE and pair-wise custom
+# derivatives are exact.  The module must additionally differentiate the
+# asymmetric correction terms, turning the raw derivatives b and a into
+# b-z_w and a-z_x before the quantizer's scale cancellation.
+dx_lre = aa.clone()                                           # df/da = b
+dw_lre = aa.clone()                                           # df/db = a
+dx_custom = aa.view(1, -1).expand(256, 256).contiguous()
+dw_custom = aa.view(-1, 1).expand(256, 256).contiguous()
+
+for grad, dx, dw in [
+        ('lre', dx_lre, dw_lre),
+        ('custom', dx_custom, dw_custom),
+]:
+    m = Conv2d_uint8(
+        3, 5, 3, prod_lut, grad=grad, dx=dx, dw=dw,
+        bias=True, stride=2, padding=2, dilation=2,
+    ).to(dev).train()
+    m.freeze_scale()
+    with torch.no_grad():
+        m.x_min.fill_(-0.9)
+        m.x_max.fill_(1.1)
+
+    x_value = torch.randn(2, 3, 13, 15, device=dev) * 0.5
+    x_actual = x_value.detach().requires_grad_(True)
+    y_actual = m(x_actual)
+    go = torch.randn_like(y_actual)
+    y_actual.backward(go)
+
+    x_ref = x_value.detach().requires_grad_(True)
+    w_ref = m.weight.detach().clone().requires_grad_(True)
+    b_ref = m.bias.detach().clone().requires_grad_(True)
+    s_x, z_x = uint8_qparams(m.x_min, m.x_max)
+    s_w, z_w = uint8_qparams(m.w_min, m.w_max)
+    xq_ref = quantization.static_quantize_uint8(x_ref, s_x, z_x)
+    wq_ref = quantization.static_quantize_uint8(
+        w_ref, s_w, z_w, ch_axis=0)
+    y_ref = F.conv2d(
+        xq_ref - z_x,
+        wq_ref - z_w.view(-1, 1, 1, 1),
+        None, m.stride, m.padding, m.dilation,
+    )
+    y_ref = torch.addcmul(
+        b_ref.view(1, -1, 1, 1), y_ref,
+        (s_x * s_w).view(1, -1, 1, 1),
+    )
+    y_ref.backward(go)
+
+    ex = relerr(x_actual.grad, x_ref.grad)
+    ew = relerr(m.weight.grad, w_ref.grad)
+    eb = relerr(m.bias.grad, b_ref.grad)
+    report(ex < 2e-5 and ew < 2e-5 and eb < 2e-6,
+           f'G {grad} centered grads gx {ex:.1e} gw {ew:.1e} gb {eb:.1e}')
 
 # ------------------------------------------------------------------------ E
 m = make_module(4, 8, 3, 1, 1, 1, rand_lut, True)
