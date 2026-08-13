@@ -15,6 +15,8 @@
 #  F. learning smoke: single layer overfits a fixed target (loss drops)
 #  G. LRE/custom exact-product derivatives plus zero-point corrections equal
 #     the centered fake-quant Conv2d surrogate
+#  H. explicit qparam buffers use CUDA-compatible float32 storage while every
+#     zero-point value remains an integer in [0, 255]
 #
 # geometry sweep: 1x1 fast path (flatten / stride slice / +padding), 3x3,
 # stride 2, dilation 2, 5x5, rectangular kernel+padding with H != W,
@@ -23,7 +25,7 @@ import torch
 import torch.nn.functional as F
 import approxtorch as at
 from approxtorch.nn import quantization
-from approxtorch.nn.Conv2d_uint8 import Conv2d_uint8, uint8_qparams
+from approxtorch.nn.Conv2d_uint8 import Conv2d_uint8
 
 torch.manual_seed(0)
 dev = 'cuda'
@@ -57,12 +59,13 @@ def make_module(C, O, k, s, p, d, lut, bias, x_range=(-0.9, 1.1)):
     with torch.no_grad():
         m.x_min.fill_(x_range[0])
         m.x_max.fill_(x_range[1])
+        m._reset_qparams_from_stats()
     return m
 
 
 def qchain(m, x):
-    s_x, z_x = uint8_qparams(m.x_min, m.x_max)
-    s_w, z_w = uint8_qparams(m.w_min, m.w_max)
+    s_x, z_x = m.scale_x, m.zero_x
+    s_w, z_w = m.scale_w, m.zero_w
     xq = quantization.static_quantize_uint8(x, s_x, z_x)
     wq = quantization.static_quantize_uint8(m.weight, s_w, z_w, ch_axis=0)
     return xq, wq, s_x, z_x, s_w, z_w
@@ -178,6 +181,12 @@ y_int = F.conv2d((xq - z_x).double(), (wq - z_w.view(-1, 1, 1, 1)).double(),
                  None, m.stride, m.padding, m.dilation)
 report(torch.equal(y, dequant_like_module(m, y_int.float(), s_x, s_w)),
        'A exact-lut fwd  ReLU data (z_x = 0)')
+report(m.zero_x.dtype == torch.float32 and m.zero_w.dtype == torch.float32
+       and torch.equal(m.zero_x, m.zero_x.round())
+       and torch.equal(m.zero_w, m.zero_w.round())
+       and bool(((m.zero_x >= 0) & (m.zero_x <= 255)).all())
+       and bool(((m.zero_w >= 0) & (m.zero_w <= 255)).all()),
+       'H qparam zero points: float32 storage, integer uint8 values')
 
 # ------------------------------------------------------------------------ G
 # For the raw exact-product LUT f(a,b)=a*b, both LRE and pair-wise custom
@@ -201,6 +210,7 @@ for grad, dx, dw in [
     with torch.no_grad():
         m.x_min.fill_(-0.9)
         m.x_max.fill_(1.1)
+        m._reset_qparams_from_stats()
 
     x_value = torch.randn(2, 3, 13, 15, device=dev) * 0.5
     x_actual = x_value.detach().requires_grad_(True)
@@ -211,8 +221,8 @@ for grad, dx, dw in [
     x_ref = x_value.detach().requires_grad_(True)
     w_ref = m.weight.detach().clone().requires_grad_(True)
     b_ref = m.bias.detach().clone().requires_grad_(True)
-    s_x, z_x = uint8_qparams(m.x_min, m.x_max)
-    s_w, z_w = uint8_qparams(m.w_min, m.w_max)
+    s_x, z_x = m.scale_x, m.zero_x
+    s_w, z_w = m.scale_w, m.zero_w
     xq_ref = quantization.static_quantize_uint8(x_ref, s_x, z_x)
     wq_ref = quantization.static_quantize_uint8(
         w_ref, s_w, z_w, ch_axis=0)

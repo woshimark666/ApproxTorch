@@ -142,7 +142,8 @@ def calibrate_uint8(
     - 权重：沿输出通道的 per-channel min/max；
     - 量化范围固定为 ``[0, 255]``；
     - min/max 范围强制包含真实 0，使 0 能被 zero point 精确表示；
-    - zero point 以 ``torch.int32`` 保存，绝不以浮点数落盘。
+    - zero point 数值严格为整数，但以 ``torch.float32`` 保存，以兼容
+      ``Conv2d_uint8`` 的运算和 CUDA fake-quant 融合接口。
 
     每个目标卷积会写入两组字段：``x_min/x_max/w_min/w_max`` 可直接加载到
     当前 ``Conv2d_uint8`` 的统计 buffer；``scale_x/zero_x/scale_w/zero_w``
@@ -292,10 +293,11 @@ def calibrate_uint8(
 
         scale_x, zero_x_float = uint8_qparams(x_min, x_max)
         scale_w, zero_w_float = uint8_qparams(w_min, w_max)
-        # 这里的 round 已在 uint8_qparams 中完成；显式转为整数 dtype 是
-        # checkpoint 契约的一部分，避免 zero point 被当作可插值浮点参数。
-        zero_x = zero_x_float.to(dtype=torch.int32)
-        zero_w = zero_w_float.to(dtype=torch.int32)
+        # uint8_qparams 已执行 round；zero point 是整数值，但这里必须保留
+        # float32 dtype。Conv2d_uint8 的 qparam buffer 和融合 CUDA fake-quant
+        # 都使用 float32，直接保存 int32 会导致类型转换或绕过融合路径。
+        zero_x = zero_x_float.to(dtype=torch.float32)
+        zero_w = zero_w_float.to(dtype=torch.float32)
 
         qparams[name] = {
             "x_min": x_min.detach().clone(),

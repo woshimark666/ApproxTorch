@@ -9,11 +9,12 @@ from . import bgemm_uint8
 
 
 def uint8_qparams(mn, mx, qmax=255):
-    """由 min/max 统计导出非对称 (scale, zero_point)，zero_point 为整数值。
+    """由 min/max 统计导出非对称 (scale, zero_point)。
 
     先把范围 clamp 到包含 0：保证 zero_point 落在 [0, qmax]、真实 0 恰好
     在格点上（padding 才能精确表示）。mn/mx 可为标量（per-tensor）或
-    [O]（per-channel），两种粒度同一套公式。
+    [O]（per-channel），两种粒度同一套公式。zero_point 在数学上严格为
+    整数，但保留浮点 dtype，以兼容 fake-quant、反量化运算和 CUDA 融合接口。
     """
     mn = torch.clamp(mn, max=0.0)
     mx = torch.clamp(mx, min=0.0)
@@ -27,8 +28,10 @@ class Conv2d_uint8(nn.Module):
     # 整数域 LUT 卷积 + 末端反量化）。量化全部 static 非对称：
     #   激活  per-tensor：q_x = clamp(round(x/s_x) + z_x, 0, 255)
     #   权重  per-channel：q_w = clamp(round(w/s_w[o]) + z_w[o], 0, 255)
-    # scale/zero_point 由 min/max 统计 buffer 导出，训练时 EMA 更新
-    # （update_scale 可冻结）；LUT 两个操作数都是原始 uint8 值 lut[q_x][q_w]。
+    # scale/zero_point 是显式 buffer；训练时先对 min/max 做 EMA，再同步更新
+    # qparams（update_scale 可冻结）。zero_point 数值为整数，但以 float32 保存，
+    # 与 fake-quant CUDA 接口一致。LUT 两个操作数都是原始 uint8 值
+    # lut[q_x][q_w]。
     #
     # 反量化含零点交叉项（K = C·kH·kW 个 tap，对每个输出 (n,o,l)）：
     #   Σ_k (q_x−z_x)(q_w−z_w[o])
@@ -93,13 +96,17 @@ class Conv2d_uint8(nn.Module):
                                                self.in_channels,
                                                self.kernel_size[0], self.kernel_size[1]))
 
-        # min/max 统计 buffer（scale/zero_point 每次 forward 由它们导出）。
+        # min/max 统计 buffer，以及由它们导出的显式 qparam buffer。
         # 激活范围冷启动给 [0, 1]，前几步 EMA 会迅速贴合真实分布；
         # 校准 checkpoint 可直接 load_state_dict 覆盖。
         self.register_buffer('x_min', torch.tensor(0.0))
         self.register_buffer('x_max', torch.tensor(1.0))
         self.register_buffer('w_min', torch.zeros(self.out_channels))
         self.register_buffer('w_max', torch.ones(self.out_channels))
+        self.register_buffer('scale_x', torch.tensor(1.0 / self.qmax))
+        self.register_buffer('zero_x', torch.tensor(0.0))
+        self.register_buffer('scale_w', torch.ones(self.out_channels))
+        self.register_buffer('zero_w', torch.zeros(self.out_channels))
 
         # bias
         if isinstance(bias, torch.Tensor) or bias == True:
@@ -116,6 +123,7 @@ class Conv2d_uint8(nn.Module):
             reduce_dims = tuple(range(1, self.weight.dim()))
             self.w_min.copy_(self.weight.detach().amin(dim=reduce_dims))
             self.w_max.copy_(self.weight.detach().amax(dim=reduce_dims))
+        self._reset_qparams_from_stats()
 
         # 外部给定 bias 时覆盖默认初始化
         if isinstance(bias, torch.Tensor):
@@ -172,6 +180,48 @@ class Conv2d_uint8(nn.Module):
     def freeze_scale(self):
         self.update_scale = False
 
+    def _reset_qparams_from_stats(self):
+        """由当前 min/max 统计量同步刷新显式 scale/zero-point buffer。"""
+        with torch.no_grad():
+            scale_x, zero_x = uint8_qparams(
+                self.x_min, self.x_max, self.qmax)
+            scale_w, zero_w = uint8_qparams(
+                self.w_min, self.w_max, self.qmax)
+            self.scale_x.copy_(scale_x)
+            self.zero_x.copy_(zero_x)
+            self.scale_w.copy_(scale_w)
+            self.zero_w.copy_(zero_w)
+
+    def _load_from_state_dict(
+            self, state_dict, prefix, local_metadata, strict,
+            missing_keys, unexpected_keys, error_msgs):
+        # 兼容早期仅保存 min/max、尚无显式 qparam buffer 的 checkpoint。
+        qparam_names = ('scale_x', 'zero_x', 'scale_w', 'zero_w')
+        legacy_stats_only = all(
+            prefix + name not in state_dict for name in qparam_names)
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict,
+            missing_keys, unexpected_keys, error_msgs)
+        if legacy_stats_only:
+            self._reset_qparams_from_stats()
+            for name in qparam_names:
+                key = prefix + name
+                if key in missing_keys:
+                    missing_keys.remove(key)
+
+        # zero point 用 float32 是执行接口要求，不代表允许小数；加载时严格
+        # 检查整数值和 uint8 范围，防止损坏的校准参数静默进入量化公式。
+        for name in ('zero_x', 'zero_w'):
+            zero = getattr(self, name)
+            valid = (torch.isfinite(zero).all()
+                     and (zero >= self.qmin).all()
+                     and (zero <= self.qmax).all()
+                     and torch.equal(zero, torch.round(zero)))
+            if not valid:
+                error_msgs.append(
+                    f"{prefix}{name} must contain integer-valued "
+                    f"values in [{self.qmin}, {self.qmax}]")
+
     def _update_scale(self, x):
         # 激活 min/max 的 EMA。多卡 DDP 下先做全局 MIN/MAX 归约，
         # 保证每个 rank 的统计量（进而 scale/zero_point）完全一致。
@@ -184,6 +234,10 @@ class Conv2d_uint8(nn.Module):
             m = self.scale_momentum
             self.x_min.copy_(m * mn + (1 - m) * self.x_min)
             self.x_max.copy_(m * mx + (1 - m) * self.x_max)
+            scale_x, zero_x = uint8_qparams(
+                self.x_min, self.x_max, self.qmax)
+            self.scale_x.copy_(scale_x)
+            self.zero_x.copy_(zero_x)
 
     def _update_scale_w(self):
         # 权重 per-channel min/max 的 EMA。DDP 下权重各 rank 逐位一致，
@@ -195,6 +249,10 @@ class Conv2d_uint8(nn.Module):
             m = self.scale_momentum
             self.w_min.copy_(m * mn + (1 - m) * self.w_min)
             self.w_max.copy_(m * mx + (1 - m) * self.w_max)
+            scale_w, zero_w = uint8_qparams(
+                self.w_min, self.w_max, self.qmax)
+            self.scale_w.copy_(scale_w)
+            self.zero_w.copy_(zero_w)
 
     def forward(self, x: torch.Tensor):
 
@@ -207,13 +265,13 @@ class Conv2d_uint8(nn.Module):
         OH = (H + 2 * pH - dH * (kH - 1) - 1) // sH + 1
         OW = (W + 2 * pW - dW * (kW - 1) - 1) // sW + 1
 
-        # 1. quantization（static：scale/zero 由统计 buffer 导出）
+        # 1. quantization（static：显式 qparams 来自校准或训练期 EMA）
         if self.training and self.update_scale:
             self._update_scale(x)
             self._update_scale_w()
 
-        scale_x, zero_x = uint8_qparams(self.x_min, self.x_max, self.qmax)
-        scale_w, zero_w = uint8_qparams(self.w_min, self.w_max, self.qmax)   # [O]
+        scale_x, zero_x = self.scale_x, self.zero_x
+        scale_w, zero_w = self.scale_w, self.zero_w       # [O]
 
         xq = quantization.static_quantize_uint8(x, scale_x, zero_x,
                                                 self.qmin, self.qmax)
