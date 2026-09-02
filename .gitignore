@@ -8,3 +8,7 @@ dist/
 .clangd
 .vscode
 .claude
+docs/
+benchmarks/
+tools/
+tests/

@@ -15,6 +15,7 @@ from . import nn
 # from . import quant_utils
 from .convert_model import convert_model
 from . import load_lut
+from . import float_lut
 from . import grad_lut
 from . import calib
 

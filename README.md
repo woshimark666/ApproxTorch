@@ -4,7 +4,9 @@
 
 Approximate multipliers are hardware circuits that trade a small amount of arithmetic accuracy for large savings in power and area. Before taping out such hardware, you need to know how much CNN accuracy you lose — and how much you can recover by retraining. ApproxTorch answers this question by replacing every multiplication inside convolution layers with a **look-up table (LUT)** of your multiplier's actual behavior, computed by highly optimized custom CUDA kernels.
 
-Because the simulation is purely LUT-driven, **any 8-bit (signed or unsigned) approximate multiplier can be simulated** — no need to write kernel code for each design.
+Because the simulation is purely LUT-driven, **any 8-bit (signed or unsigned)
+approximate multiplier can be simulated**. ApproxTorch also supports normalized-
+mantissa LUTs for approximate **FP16 and BF16** GEMM and BGEMM.
 
 ```text
  FP32 input ──► quantize (int8) ──► im2col ──► LUT-based approximate GEMM ──► dequantize ──► FP32 output
@@ -16,6 +18,8 @@ Because the simulation is purely LUT-driven, **any 8-bit (signed or unsigned) ap
 - 🚀 **GPU-accelerated**: hand-written CUDA kernels for LUT-based approximate batched GEMM — fast enough to retrain networks like ResNet on ImageNet-scale data.
 - 🎯 **Train *and* infer**: full autograd support, so you can do approximate-multiplier-aware retraining (QAT), not just evaluation.
 - 🧮 **Any 8-bit multiplier**: behavior is defined entirely by a 256×256 LUT text file.
+- 🧠 **Approximate FP16/BF16**: LUT mantissa GEMM/BGEMM with ordered FP32
+  accumulation and one final 16-bit conversion.
 - 🔁 **Gradient estimators** for backpropagating through the non-differentiable LUT:
   - **STE** — straight-through estimator (default)
   - **LRE** — linear-regression-estimated gradient LUTs
@@ -167,7 +171,19 @@ buffers, so they can be loaded after model conversion.
 
 ### Low-level ops (`approxtorch.backend.ops`)
 
-If you want to build your own layers, the raw CUDA ops are exposed as PyTorch custom ops: `bgemm_int8`, `bgemm_uint8`, `gemm_int8`, `gemm_uint8`, `im2col_int8`, `im2col_uint8`, `lut_lookup_int8`, `elementwise_mul`, and the LRE/custom-gradient backward kernels.
+If you want to build your own layers, the raw CUDA ops are exposed as PyTorch
+custom ops, including the integer operations and `approx_mul_fp16`,
+`approx_mul_bf16`, `gemm_fp16`, `gemm_bf16`, `bgemm_fp16`, and `bgemm_bf16`
+(plus their `_naive` reference kernels).
+
+The matching STE autograd wrappers are split by dtype:
+
+```python
+from approxtorch.nn import bgemm_fp16, bgemm_bf16
+
+y16 = bgemm_fp16.bgemm_fp16_ste(x16, w16, lut16)
+yb = bgemm_bf16.bgemm_bf16_ste(xb, wb, lutb)
+```
 
 ## Repository Layout
 

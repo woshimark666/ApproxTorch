@@ -24,7 +24,17 @@ __all__ = ['im2col_int8',
            'bgemm_custom_grad_int8_dx',
            'bgemm_custom_grad_int8_dw',
            'bgemm_custom_grad_uint8_dx',
-           'bgemm_custom_grad_uint8_dw']
+           'bgemm_custom_grad_uint8_dw',
+           'approx_mul_fp16',
+           'approx_mul_bf16',
+           'gemm_fp16_naive',
+           'gemm_fp16',
+           'gemm_bf16_naive',
+           'gemm_bf16',
+           'bgemm_fp16_naive',
+           'bgemm_fp16',
+           'bgemm_bf16_naive',
+           'bgemm_bf16']
 
 def im2col_int8(feature: Tensor, kernel_size, stride=1, padding=0, dilation=1) -> Tensor:
     kernel_size = _pair(kernel_size)
@@ -276,3 +286,43 @@ def bgemm_lre_backward_claude_im2col(grad_output: Tensor, x: Tensor, w: Tensor,
 
 def elementwise_mul(a: Tensor, b: Tensor, lut: Tensor) -> Tensor:
     return torch.ops.approxtorch.elementwise_mul.default(a, b, lut)
+
+
+def approx_mul_fp16(lhs: Tensor, rhs: Tensor, lut: Tensor) -> Tensor:
+    return torch.ops.approxtorch.approx_mul_fp16.default(lhs, rhs, lut)
+
+
+def approx_mul_bf16(lhs: Tensor, rhs: Tensor, lut: Tensor) -> Tensor:
+    return torch.ops.approxtorch.approx_mul_bf16.default(lhs, rhs, lut)
+
+
+def gemm_fp16_naive(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
+    return torch.ops.approxtorch.gemm_fp16_naive.default(A, B, lut)
+
+
+def gemm_fp16(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
+    return torch.ops.approxtorch.gemm_fp16.default(A, B, lut)
+
+
+def gemm_bf16_naive(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
+    return torch.ops.approxtorch.gemm_bf16_naive.default(A, B, lut)
+
+
+def gemm_bf16(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
+    return torch.ops.approxtorch.gemm_bf16.default(A, B, lut)
+
+
+def bgemm_fp16_naive(X: Tensor, W: Tensor, lut: Tensor) -> Tensor:
+    return torch.ops.approxtorch.bgemm_fp16_naive.default(X, W, lut)
+
+
+def bgemm_fp16(X: Tensor, W: Tensor, lut: Tensor) -> Tensor:
+    return torch.ops.approxtorch.bgemm_fp16.default(X, W, lut)
+
+
+def bgemm_bf16_naive(X: Tensor, W: Tensor, lut: Tensor) -> Tensor:
+    return torch.ops.approxtorch.bgemm_bf16_naive.default(X, W, lut)
+
+
+def bgemm_bf16(X: Tensor, W: Tensor, lut: Tensor) -> Tensor:
+    return torch.ops.approxtorch.bgemm_bf16.default(X, W, lut)
