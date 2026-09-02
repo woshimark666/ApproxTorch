@@ -5,10 +5,10 @@ from typing import Literal
 import torch
 import torch.nn as nn
 
-from .nn import Conv2d_int8, Conv2d_uint8
+from .nn import Conv2d_bf16, Conv2d_fp16, Conv2d_int8, Conv2d_uint8
 
 
-QType = Literal["int8", "uint8"]
+QType = Literal["int8", "uint8", "fp16", "bf16"]
 GradType = Literal["ste", "lre", "custom"]
 
 
@@ -29,20 +29,23 @@ def _copy_conv_state(source: nn.Conv2d, target: nn.Module, qtype: QType) -> None
     """Copy parameters and initialize qparams from the copied weights."""
     device = source.weight.device
     _move_qparams_to_device(target, device)
+    target_dtype = target.weight.dtype
 
     target.weight = nn.Parameter(
-        source.weight.detach().clone(memory_format=torch.preserve_format),
+        source.weight.detach().to(dtype=target_dtype).clone(
+            memory_format=torch.preserve_format
+        ),
         requires_grad=source.weight.requires_grad,
     )
     if source.bias is not None:
         target.bias = nn.Parameter(
-            source.bias.detach().clone(),
+            source.bias.detach().to(dtype=target_dtype).clone(),
             requires_grad=source.bias.requires_grad,
         )
 
     if qtype == "int8":
         target._reset_scale_w_from_weight()
-    else:
+    elif qtype == "uint8":
         with torch.no_grad():
             reduce_dims = tuple(range(1, target.weight.dim()))
             target.w_min.copy_(
@@ -68,6 +71,7 @@ def _make_approx_conv(
     scale_momentum: float,
     update_scale: bool,
     weight_bits: int,
+    optimized: bool,
 ) -> nn.Module:
     if isinstance(module.padding, str):
         raise NotImplementedError(
@@ -80,27 +84,40 @@ def _make_approx_conv(
             f"got {module.padding_mode!r}"
         )
 
-    common_args = dict(
+    geometry = dict(
         in_channels=module.in_channels,
         out_channels=module.out_channels,
         kernel_size=module.kernel_size,
         lut=lut,
-        grad=grad,
-        dx=dx,
-        dw=dw,
         bias=module.bias is not None,
         stride=module.stride,
         padding=module.padding,
         dilation=module.dilation,
         groups=module.groups,
-        update_scale=update_scale,
-        scale_momentum=scale_momentum,
     )
 
     if qtype == "int8":
-        new_module = Conv2d_int8(**common_args, weight_bits=weight_bits)
+        new_module = Conv2d_int8(
+            **geometry,
+            grad=grad,
+            dx=dx,
+            dw=dw,
+            update_scale=update_scale,
+            scale_momentum=scale_momentum,
+            weight_bits=weight_bits,
+        )
+    elif qtype == "uint8":
+        new_module = Conv2d_uint8(
+            **geometry,
+            grad=grad,
+            dx=dx,
+            dw=dw,
+            update_scale=update_scale,
+            scale_momentum=scale_momentum,
+        )
     else:
-        new_module = Conv2d_uint8(**common_args)
+        module_type = Conv2d_fp16 if qtype == "fp16" else Conv2d_bf16
+        new_module = module_type(**geometry, optimized=optimized)
 
     _copy_conv_state(module, new_module, qtype)
     return new_module
@@ -117,6 +134,7 @@ def convert_model(
     scale_momentum: float = 0.05,
     update_scale: bool = True,
     weight_bits: int = 8,
+    optimized: bool = True,
 ) -> nn.Module:
     """Replace selected ``nn.Conv2d`` layers with approximate convolutions.
 
@@ -127,6 +145,8 @@ def convert_model(
       weights;
     - ``uint8``: per-tensor asymmetric activations and per-channel asymmetric
       weights.
+    - ``fp16`` and ``bf16``: no quantization; parameters are cast to the
+      selected format and multiplication is supplied by the mantissa LUT.
 
     Consequently, quantizer configuration is intentionally not part of this
     API. ``weight_bits`` applies only to ``int8``; unsigned quantization is
@@ -137,8 +157,8 @@ def convert_model(
 
     Args:
         model: Model whose exact convolution layers should be replaced.
-        lut: Flattened or 2-D 256 x 256 approximate-multiplier LUT.
-        qtype: Signed ``"int8"`` or unsigned ``"uint8"`` convolution.
+        lut: Approximate-multiplier LUT for the selected qtype.
+        qtype: ``"int8"``, ``"uint8"``, ``"fp16"``, or ``"bf16"``.
         grad: Backward estimator: ``"ste"``, ``"lre"`` or ``"custom"``.
         dx: Input-operand gradient LUT required by ``lre`` and ``custom``.
         dw: Weight-operand gradient LUT required by ``lre`` and ``custom``.
@@ -146,6 +166,7 @@ def convert_model(
         scale_momentum: EMA momentum for activation and weight statistics.
         update_scale: Update quantization statistics during training.
         weight_bits: Signed weight precision from 3 to 8 bits (int8 only).
+        optimized: Use the optimized FP16/BF16 BGEMM kernel when true.
 
     Returns:
         The converted model.
@@ -154,18 +175,39 @@ def convert_model(
         raise TypeError(f"model must be an nn.Module, got {type(model).__name__}")
     if not isinstance(lut, torch.Tensor):
         raise TypeError(f"lut must be a torch.Tensor, got {type(lut).__name__}")
-    if lut.numel() != 256 * 256:
-        raise ValueError(f"lut must have 65536 elements, got {lut.numel()}")
-    if qtype not in ("int8", "uint8"):
-        raise ValueError(f"qtype must be 'int8' or 'uint8', got {qtype!r}")
+    if qtype not in ("int8", "uint8", "fp16", "bf16"):
+        raise ValueError(
+            "qtype must be 'int8', 'uint8', 'fp16', or 'bf16', "
+            f"got {qtype!r}"
+        )
+    if qtype in ("int8", "uint8"):
+        if lut.numel() != 256 * 256:
+            raise ValueError(f"lut must have 65536 elements, got {lut.numel()}")
+    else:
+        side = 1024 if qtype == "fp16" else 128
+        allowed_dtypes = (
+            (torch.uint16, torch.uint32)
+            if qtype == "fp16"
+            else (torch.uint16,)
+        )
+        if lut.dtype not in allowed_dtypes:
+            raise TypeError(f"{qtype} lut has an invalid dtype {lut.dtype}")
+        if tuple(lut.shape) != (side, side):
+            raise ValueError(f"{qtype} lut must have shape ({side}, {side})")
     if grad not in ("ste", "lre", "custom"):
         raise ValueError(
             f"grad must be 'ste', 'lre' or 'custom', got {grad!r}"
         )
+    if qtype in ("fp16", "bf16") and grad != "ste":
+        raise ValueError("FP16/BF16 convolution supports only grad='ste'")
+    if qtype in ("fp16", "bf16") and (dx is not None or dw is not None):
+        raise ValueError("dx and dw are not used by FP16/BF16 convolution")
     if not isinstance(ignore_first_conv, bool):
         raise TypeError("ignore_first_conv must be a bool")
     if not isinstance(update_scale, bool):
         raise TypeError("update_scale must be a bool")
+    if not isinstance(optimized, bool):
+        raise TypeError("optimized must be a bool")
     if not 0.0 <= scale_momentum <= 1.0:
         raise ValueError(
             "scale_momentum must be between 0 and 1, "
@@ -204,6 +246,7 @@ def convert_model(
                 scale_momentum,
                 update_scale,
                 weight_bits,
+                optimized,
             ),
         )
         for name, module in convs

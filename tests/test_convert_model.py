@@ -119,7 +119,6 @@ class ConvertModelTest(unittest.TestCase):
                         stride=(2, 1),
                         padding=(2, 1),
                         dilation=(2, 1),
-                        groups=2,
                     ),
                 )
                 source = model[1]
@@ -149,10 +148,10 @@ class ConvertModelTest(unittest.TestCase):
                 self.assertEqual(converted.stride, (2, 1))
                 self.assertEqual(converted.padding, (2, 1))
                 self.assertEqual(converted.dilation, (2, 1))
-                self.assertEqual(converted.groups, 2)
+                self.assertEqual(converted.groups, 1)
 
     def test_root_bf16_conv_is_returned_and_float_contract_is_checked(self):
-        source = nn.Conv2d(2, 4, 1, groups=2, bias=False)
+        source = nn.Conv2d(2, 4, 1, bias=False)
         expected = source.weight.detach().to(torch.bfloat16)
         lut = self._float_lut("bf16")
 
@@ -174,6 +173,23 @@ class ConvertModelTest(unittest.TestCase):
             convert_model(source, lut, qtype="bf16", dx=torch.ones(1))
         with self.assertRaisesRegex(TypeError, "dtype"):
             convert_model(source, lut.to(torch.int32), qtype="bf16")
+
+    def test_float_grouped_conversion_is_rejected_without_partial_mutation(self):
+        model = nn.Sequential(
+            nn.Conv2d(4, 4, 1),
+            nn.Conv2d(4, 4, 3, padding=1, groups=2),
+        )
+
+        with self.assertRaisesRegex(NotImplementedError, "only groups=1"):
+            convert_model(
+                model,
+                self._float_lut("bf16"),
+                qtype="bf16",
+                ignore_first_conv=False,
+            )
+
+        self.assertIsInstance(model[0], nn.Conv2d)
+        self.assertIsInstance(model[1], nn.Conv2d)
 
     def test_unsupported_uint8_group_does_not_partially_convert(self):
         model = nn.Sequential(
