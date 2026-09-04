@@ -22,7 +22,7 @@ __device__ __forceinline__ __nv_bfloat16 bf16_zero() {
 __global__ void bgemm_bf16_naive_kernel(
     const __nv_bfloat16* __restrict__ X,
     const __nv_bfloat16* __restrict__ W,
-    const uint16_t* __restrict__ lut,
+    const uint32_t* __restrict__ lut,
     __nv_bfloat16* __restrict__ Y,
     int64_t batch,
     int64_t O,
@@ -58,7 +58,7 @@ __global__ __launch_bounds__(kThreads)
 void bgemm_bf16_tiled_kernel(
     const __nv_bfloat16* __restrict__ X,
     const __nv_bfloat16* __restrict__ W,
-    const uint16_t* __restrict__ lut,
+    const uint32_t* __restrict__ lut,
     __nv_bfloat16* __restrict__ Y,
     int64_t O,
     int64_t L,
@@ -197,7 +197,7 @@ template <int outputs_per_lane>
 void launch_bgemm_bf16_tiled(
     const __nv_bfloat16* X,
     const __nv_bfloat16* W,
-    const uint16_t* lut,
+    const uint32_t* lut,
     __nv_bfloat16* Y,
     int64_t batch,
     int64_t O,
@@ -230,7 +230,7 @@ torch::Tensor launch_bgemm_bf16(
   TORCH_CHECK(X.size(1) == W.size(1), op_name,
               ": K dimensions must match, got X.shape[1]=", X.size(1),
               " and W.shape[1]=", W.size(1));
-  check_lut(lut, torch::kUInt16, 128, X.device(), op_name);
+  check_lut(lut, torch::kUInt32, 128, X.device(), op_name);
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(X));
   const int64_t batch = X.size(0);
@@ -248,7 +248,7 @@ torch::Tensor launch_bgemm_bf16(
   const auto* W_ptr =
       reinterpret_cast<const __nv_bfloat16*>(W.data_ptr<at::BFloat16>());
   auto* Y_ptr = reinterpret_cast<__nv_bfloat16*>(Y.data_ptr<at::BFloat16>());
-  const auto* lut_ptr = lut.data_ptr<uint16_t>();
+  const auto* lut_ptr = lut.data_ptr<uint32_t>();
   const auto stream = at::cuda::getCurrentCUDAStream();
 
   if (!optimized || K < kKTile || L < 192 || O < 16) {

@@ -23,7 +23,7 @@ constexpr uint16_t kLutNormalizationBit = 0x0080u;
 // LUT contract:
 //   - shape: [128, 128], flattened row-major;
 //   - index: lut[fraction(a) * 128 + fraction(b)];
-//   - entry type: uint16_t, with only bits 7:0 used;
+//   - entry type: uint32_t, with only bits 7:0 used;
 //   - bit 7: add one to the result exponent;
 //   - bits 6:0: result fraction.
 //
@@ -38,7 +38,7 @@ constexpr uint16_t kLutNormalizationBit = 0x0080u;
 __device__ __forceinline__ __nv_bfloat16 approx_mul_bf16(
     __nv_bfloat16 a,
     __nv_bfloat16 b,
-    const uint16_t* __restrict__ mantissa_lut) {
+    const uint32_t* __restrict__ mantissa_lut) {
   using namespace bf16_detail;
 
   const uint16_t bits_a = __bfloat16_as_ushort(a);
@@ -57,7 +57,7 @@ __device__ __forceinline__ __nv_bfloat16 approx_mul_bf16(
   const uint32_t fraction_b = bits_b & kFractionMask;
   const uint32_t lut_index =
       (fraction_a << kFractionBits) | fraction_b;
-  const uint16_t lut_entry = __ldg(mantissa_lut + lut_index);
+  const uint32_t lut_entry = __ldg(mantissa_lut + lut_index);
 
   const uint16_t fraction_out = lut_entry & kFractionMask;
   const uint32_t normalization =

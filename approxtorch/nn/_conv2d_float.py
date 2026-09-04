@@ -1,4 +1,9 @@
-"""Shared implementation for LUT-based FP16 and BF16 convolutions."""
+"""Shared implementation for LUT-based FP16 and BF16 convolutions.
+
+The concrete FP16 and BF16 module bases are deliberately separate so their
+parameter dtype and representation are explicit. Only validation and the
+functional convolution path are shared.
+"""
 
 from __future__ import annotations
 
@@ -48,8 +53,8 @@ def _validate_lut(
 ) -> None:
     if not isinstance(lut, torch.Tensor):
         raise TypeError(f"lut must be a torch.Tensor, got {type(lut).__name__}")
-    if lut.dtype != torch.uint16:
-        raise TypeError(f"{kind} lut must have dtype torch.uint16, got {lut.dtype}")
+    if lut.dtype != torch.uint32:
+        raise TypeError(f"{kind} lut must have dtype torch.uint32, got {lut.dtype}")
     side = _LUT_SIDES[kind]
     if tuple(lut.shape) != (side, side):
         raise ValueError(
@@ -186,8 +191,8 @@ def conv2d_approx_float(
     return output
 
 
-class ApproxConv2dFloat(nn.Module):
-    """Common nn.Module implementation for 16-bit approximate convolutions."""
+class _ApproxConv2dFloatBase(nn.Module):
+    """Internal state implementation shared by the two concrete dtypes."""
 
     def __init__(
         self,
@@ -251,12 +256,8 @@ class ApproxConv2dFloat(nn.Module):
 
         if not isinstance(lut, torch.Tensor):
             raise TypeError(f"lut must be a torch.Tensor, got {type(lut).__name__}")
-        lut_device = torch.device(device) if device is not None else lut.device
-        # Older FP16 generators emitted uint32 LUTs, although entries use only
-        # 11 bits. Normalize those LUTs to the uint16 CUDA-kernel contract.
-        if kind == "fp16" and lut.dtype == torch.uint32:
-            lut = lut.to(dtype=torch.uint16)
         _validate_lut(lut, kind, require_cuda=False)
+        lut_device = torch.device(device) if device is not None else lut.device
         self.register_buffer("lut", lut.to(device=lut_device))
 
         factory_kwargs = {"device": lut_device, "dtype": expected_dtype}
@@ -315,11 +316,28 @@ class ApproxConv2dFloat(nn.Module):
             self.optimized,
         )
 
+
+class ApproxConv2dFloat16(_ApproxConv2dFloatBase):
+    """FP16 module base with an explicit FP16 representation."""
+
     def extra_repr(self) -> str:
         return (
             f"in_channels={self.in_channels}, out_channels={self.out_channels}, "
             f"kernel_size={self.kernel_size}, stride={self.stride}, "
             f"padding={self.padding}, dilation={self.dilation}, "
             f"groups={self.groups}, bias={self.bias is not None}, "
-            f"dtype={self.kind}, optimized={self.optimized}"
+            f"dtype=torch.float16, optimized={self.optimized}"
+        )
+
+
+class ApproxConv2dBFloat16(_ApproxConv2dFloatBase):
+    """BF16 module base with an explicit BF16 representation."""
+
+    def extra_repr(self) -> str:
+        return (
+            f"in_channels={self.in_channels}, out_channels={self.out_channels}, "
+            f"kernel_size={self.kernel_size}, stride={self.stride}, "
+            f"padding={self.padding}, dilation={self.dilation}, "
+            f"groups={self.groups}, bias={self.bias is not None}, "
+            f"dtype=torch.bfloat16, optimized={self.optimized}"
         )

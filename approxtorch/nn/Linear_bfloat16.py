@@ -25,8 +25,8 @@ def _validate_lut(
 ) -> None:
     if not isinstance(lut, torch.Tensor):
         raise TypeError(f"lut must be a torch.Tensor, got {type(lut).__name__}")
-    if lut.dtype != torch.uint16:
-        raise TypeError(f"bf16 lut must have dtype torch.uint16, got {lut.dtype}")
+    if lut.dtype != torch.uint32:
+        raise TypeError(f"bf16 lut must have dtype torch.uint32, got {lut.dtype}")
     if tuple(lut.shape) != (_LUT_SIDE, _LUT_SIDE):
         raise ValueError(
             f"bf16 lut must have shape ({_LUT_SIDE}, {_LUT_SIDE}), "
@@ -223,7 +223,7 @@ class Linear_bfloat16(nn.Module):
     def extra_repr(self) -> str:
         return (
             f"in_features={self.in_features}, out_features={self.out_features}, "
-            f"bias={self.bias is not None}, dtype=bf16, "
+            f"bias={self.bias is not None}, dtype=torch.bfloat16, "
             f"optimized={self.optimized}"
         )
 

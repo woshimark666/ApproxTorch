@@ -12,7 +12,7 @@ using float_cuda_detail::kThreads;
 __global__ void approx_mul_fp16_kernel(
     const __half* __restrict__ lhs,
     const __half* __restrict__ rhs,
-    const uint16_t* __restrict__ lut,
+    const uint32_t* __restrict__ lut,
     __half* __restrict__ output,
     int64_t count) {
   for (int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x +
@@ -27,7 +27,7 @@ __global__ void approx_mul_fp16_kernel(
 __global__ void gemm_fp16_direct_kernel(
     const __half* __restrict__ A,
     const __half* __restrict__ B,
-    const uint16_t* __restrict__ lut,
+    const uint32_t* __restrict__ lut,
     __half* __restrict__ C,
     int64_t M,
     int64_t N,
@@ -67,7 +67,7 @@ torch::Tensor approx_mul_fp16_cuda(
               kOpName, ": lhs and rhs must be contiguous");
   TORCH_CHECK(lhs.device() == rhs.device(),
               kOpName, ": lhs and rhs must be on the same CUDA device");
-  check_lut(lut, torch::kUInt16, 1024, lhs.device(), kOpName);
+  check_lut(lut, torch::kUInt32, 1024, lhs.device(), kOpName);
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(lhs));
   auto output = torch::empty_like(lhs);
@@ -80,7 +80,7 @@ torch::Tensor approx_mul_fp16_cuda(
          at::cuda::getCurrentCUDAStream()>>>(
           reinterpret_cast<const __half*>(lhs.data_ptr<at::Half>()),
           reinterpret_cast<const __half*>(rhs.data_ptr<at::Half>()),
-          lut.data_ptr<uint16_t>(),
+          lut.data_ptr<uint32_t>(),
           reinterpret_cast<__half*>(output.data_ptr<at::Half>()),
           count);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -100,7 +100,7 @@ torch::Tensor launch_gemm_fp16(
   TORCH_CHECK(A.size(1) == B.size(0), op_name,
               ": inner dimensions must match, got A[", A.size(0), ", ",
               A.size(1), "] and B[", B.size(0), ", ", B.size(1), "]");
-  check_lut(lut, torch::kUInt16, 1024, A.device(), op_name);
+  check_lut(lut, torch::kUInt32, 1024, A.device(), op_name);
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(A));
   const int64_t M = A.size(0);
@@ -117,7 +117,7 @@ torch::Tensor launch_gemm_fp16(
   const auto* B_ptr =
       reinterpret_cast<const __half*>(B.data_ptr<at::Half>());
   auto* C_ptr = reinterpret_cast<__half*>(C.data_ptr<at::Half>());
-  const auto* lut_ptr = lut.data_ptr<uint16_t>();
+  const auto* lut_ptr = lut.data_ptr<uint32_t>();
   const auto stream = at::cuda::getCurrentCUDAStream();
 
   // The one-thread-per-output mapping is the fastest measured GEMM path:

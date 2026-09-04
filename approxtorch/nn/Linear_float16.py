@@ -25,8 +25,8 @@ def _validate_lut(
 ) -> None:
     if not isinstance(lut, torch.Tensor):
         raise TypeError(f"lut must be a torch.Tensor, got {type(lut).__name__}")
-    if lut.dtype != torch.uint16:
-        raise TypeError(f"fp16 lut must have dtype torch.uint16, got {lut.dtype}")
+    if lut.dtype != torch.uint32:
+        raise TypeError(f"fp16 lut must have dtype torch.uint32, got {lut.dtype}")
     if tuple(lut.shape) != (_LUT_SIDE, _LUT_SIDE):
         raise ValueError(
             f"fp16 lut must have shape ({_LUT_SIDE}, {_LUT_SIDE}), "
@@ -168,11 +168,8 @@ class Linear_float16(nn.Module):
         self.out_features = out_features
         self.optimized = optimized
 
-        target_device = torch.device(device) if device is not None else lut.device
-        # Older FP16 generators emitted uint32 entries whose values use 11 bits.
-        if lut.dtype == torch.uint32:
-            lut = lut.to(dtype=torch.uint16)
         _validate_lut(lut, require_cuda=False)
+        target_device = torch.device(device) if device is not None else lut.device
         self.register_buffer("lut", lut.to(device=target_device))
 
         factory_kwargs = {"device": target_device, "dtype": torch.float16}
@@ -224,7 +221,7 @@ class Linear_float16(nn.Module):
     def extra_repr(self) -> str:
         return (
             f"in_features={self.in_features}, out_features={self.out_features}, "
-            f"bias={self.bias is not None}, dtype=fp16, "
+            f"bias={self.bias is not None}, dtype=torch.float16, "
             f"optimized={self.optimized}"
         )
 

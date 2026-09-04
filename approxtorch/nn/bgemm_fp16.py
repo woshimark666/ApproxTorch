@@ -36,7 +36,7 @@ def bgemm_fp16_ste(x, w, lut, optimized=True):
     Args:
         x: Contiguous CUDA FP16 tensor with shape ``[N, K, L]``.
         w: Contiguous CUDA FP16 tensor with shape ``[O, K]``.
-        lut: Contiguous CUDA uint16 LUT with shape ``[1024, 1024]``.
+        lut: Contiguous CUDA uint32 LUT with shape ``[1024, 1024]``.
         optimized: Select the optimized kernel when true.
     """
     return _bgemm_fp16_ste.apply(x, w, lut, optimized)

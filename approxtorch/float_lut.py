@@ -38,8 +38,8 @@ def validate_mantissa_lut(
     side, _ = _spec(kind)
     if not isinstance(lut, torch.Tensor):
         raise TypeError(f"lut must be a torch.Tensor, got {type(lut).__name__}")
-    if lut.dtype != torch.uint16:
-        raise TypeError(f"{kind} lut must have dtype torch.uint16, got {lut.dtype}")
+    if lut.dtype != torch.uint32:
+        raise TypeError(f"{kind} lut must have dtype torch.uint32, got {lut.dtype}")
     if tuple(lut.shape) != (side, side):
         raise ValueError(
             f"{kind} lut must have shape ({side}, {side}), got {tuple(lut.shape)}"
@@ -62,12 +62,25 @@ def _load_manifest(directory: Path, stem: str, kind: str, side: int) -> dict:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except FileNotFoundError as error:
         raise FileNotFoundError(f"LUT manifest not found: {manifest_path}") from error
+    expected_size = side * side * 4
+    if manifest.get("schema_version") != 2:
+        raise ValueError("LUT manifest schema_version must be 2")
+    if manifest.get("version") != "rtl-mantissa-result-v2":
+        raise ValueError("LUT manifest version must be rtl-mantissa-result-v2")
     if manifest.get("kind") != kind:
         raise ValueError(f"LUT manifest kind does not match {kind!r}")
     if manifest.get("shape") != [side, side]:
         raise ValueError(f"LUT manifest shape does not match [{side}, {side}]")
-    if manifest.get("logical_dtype") != "uint16":
-        raise TypeError("LUT manifest dtype must be uint16")
+    if manifest.get("logical_dtype") != "uint32":
+        raise TypeError("LUT manifest dtype must be uint32")
+    if manifest.get("element_size_bytes") != 4:
+        raise ValueError("LUT manifest element_size_bytes must be 4")
+    if manifest.get("data_size_bytes") != expected_size:
+        raise ValueError(
+            f"LUT manifest data_size_bytes must be {expected_size}"
+        )
+    if manifest.get("binary_byte_order") != "little":
+        raise ValueError("LUT manifest binary_byte_order must be little")
     return manifest
 
 
@@ -84,21 +97,21 @@ def _load_binary(
 ) -> torch.Tensor:
     path = directory / f"{stem}.bin"
     data = path.read_bytes()
-    expected_size = side * side * 2
+    expected_size = side * side * 4
     if len(data) != expected_size:
         raise ValueError(
             f"LUT binary has {len(data)} bytes, expected {expected_size}"
         )
     _check_file_hash(data, manifest.get("data_sha256"), "LUT binary")
     if sys.byteorder == "little":
-        return torch.frombuffer(bytearray(data), dtype=torch.uint16).reshape(
+        return torch.frombuffer(bytearray(data), dtype=torch.uint32).reshape(
             side, side
         )
     values = [
-        int.from_bytes(data[index : index + 2], byteorder="little")
-        for index in range(0, len(data), 2)
+        int.from_bytes(data[index : index + 4], byteorder="little")
+        for index in range(0, len(data), 4)
     ]
-    return torch.tensor(values, dtype=torch.uint16).reshape(side, side)
+    return torch.tensor(values, dtype=torch.uint32).reshape(side, side)
 
 
 def _load_pytorch(

@@ -5,12 +5,14 @@ import torch
 import torch.nn as nn
 
 import approxtorch
-from approxtorch.convert_model import convert_model
+from approxtorch.convert_model import convert_float_model, convert_int_model
 from approxtorch.nn import (
     Conv2d_bf16,
     Conv2d_fp16,
     Conv2d_int8,
     Conv2d_uint8,
+    Linear_bf16,
+    Linear_fp16,
     conv2d_bf16,
     conv2d_fp16,
 )
@@ -21,21 +23,25 @@ class ConvertModelTest(unittest.TestCase):
     def setUp(self):
         self.lut = torch.zeros(256, 256, dtype=torch.float32)
 
-    def test_public_api_has_only_unified_entry(self):
-        parameters = inspect.signature(convert_model).parameters
+    def test_public_api_is_split_by_number_domain(self):
+        int_parameters = inspect.signature(convert_int_model).parameters
+        float_parameters = inspect.signature(convert_float_model).parameters
 
-        self.assertNotIn("x_quantizer", parameters)
-        self.assertNotIn("w_quantizer", parameters)
-        self.assertFalse(hasattr(approxtorch, "to_qat_int8"))
-        self.assertNotIn("x_quantizer", inspect.signature(Conv2d_int8).parameters)
-        self.assertNotIn("w_quantizer", inspect.signature(Conv2d_int8).parameters)
+        self.assertIs(approxtorch.convert_int_model, convert_int_model)
+        self.assertIs(approxtorch.convert_float_model, convert_float_model)
+        self.assertFalse(callable(approxtorch.convert_model))
+        self.assertIn("grad", int_parameters)
+        self.assertIn("weight_bits", int_parameters)
+        self.assertNotIn("optimized", int_parameters)
+        self.assertIn("optimized", float_parameters)
+        self.assertNotIn("grad", float_parameters)
         self.assertTrue(callable(conv2d_fp16))
         self.assertTrue(callable(conv2d_bf16))
 
     @staticmethod
     def _float_lut(kind):
         side = 1024 if kind == "fp16" else 128
-        dtype = torch.uint32 if kind == "fp16" else torch.uint16
+        dtype = torch.uint32
         values = torch.arange(side, dtype=torch.int64)
         return ((side + values[:, None]) * (side + values[None, :])).to(dtype)
 
@@ -50,7 +56,7 @@ class ConvertModelTest(unittest.TestCase):
         expected_bias = source.bias.detach().clone()
         model.eval()
 
-        result = convert_model(model, self.lut, qtype="int8", weight_bits=5)
+        result = convert_int_model(model, self.lut, qtype="int8", weight_bits=5)
 
         self.assertIs(result, model)
         self.assertIsInstance(model[0], nn.Conv2d)
@@ -68,7 +74,7 @@ class ConvertModelTest(unittest.TestCase):
         model = nn.Sequential(nn.Conv2d(2, 3, 3, bias=False))
         source_weight = model[0].weight.detach().clone()
 
-        convert_model(
+        convert_int_model(
             model,
             self.lut,
             qtype="uint8",
@@ -94,7 +100,7 @@ class ConvertModelTest(unittest.TestCase):
         source = nn.Conv2d(3, 4, 1)
         expected_weight = source.weight.detach().clone()
 
-        converted = convert_model(
+        converted = convert_int_model(
             source,
             self.lut,
             qtype="int8",
@@ -127,7 +133,7 @@ class ConvertModelTest(unittest.TestCase):
                 expected_bias = source.bias.detach().to(dtype)
                 model.eval()
 
-                result = convert_model(
+                result = convert_float_model(
                     model,
                     self._float_lut(kind),
                     qtype=kind,
@@ -140,6 +146,8 @@ class ConvertModelTest(unittest.TestCase):
                 self.assertIsInstance(converted, cls)
                 self.assertEqual(converted.weight.dtype, dtype)
                 self.assertEqual(converted.bias.dtype, dtype)
+                self.assertEqual(converted.lut.dtype, torch.uint32)
+                self.assertIn(f"dtype={dtype}", repr(converted))
                 torch.testing.assert_close(converted.weight, expected_weight)
                 torch.testing.assert_close(converted.bias, expected_bias)
                 self.assertFalse(converted.weight.requires_grad)
@@ -155,7 +163,7 @@ class ConvertModelTest(unittest.TestCase):
         expected = source.weight.detach().to(torch.bfloat16)
         lut = self._float_lut("bf16")
 
-        converted = convert_model(
+        converted = convert_float_model(
             source,
             lut,
             qtype="bf16",
@@ -165,14 +173,75 @@ class ConvertModelTest(unittest.TestCase):
         self.assertIsInstance(converted, Conv2d_bf16)
         self.assertIsNone(converted.bias)
         torch.testing.assert_close(converted.weight, expected)
-        self.assertIs(convert_model(converted, lut, qtype="bf16"), converted)
+        self.assertIs(
+            convert_float_model(converted, lut, qtype="bf16"), converted
+        )
 
-        with self.assertRaisesRegex(ValueError, "only grad='ste'"):
-            convert_model(source, lut, qtype="bf16", grad="lre")
-        with self.assertRaisesRegex(ValueError, "dx and dw"):
-            convert_model(source, lut, qtype="bf16", dx=torch.ones(1))
-        with self.assertRaisesRegex(TypeError, "dtype"):
-            convert_model(source, lut.to(torch.int32), qtype="bf16")
+        with self.assertRaisesRegex(TypeError, "torch.uint32"):
+            convert_float_model(source, lut.to(torch.int32), qtype="bf16")
+
+    def test_float_conversion_also_converts_linear(self):
+        for kind, layer_type, dtype in (
+            ("fp16", Linear_fp16, torch.float16),
+            ("bf16", Linear_bf16, torch.bfloat16),
+        ):
+            with self.subTest(kind=kind):
+                model = nn.Sequential(nn.Conv2d(2, 2, 1), nn.Linear(4, 3))
+                source = model[1]
+                source.bias.requires_grad_(False)
+                expected_weight = source.weight.detach().to(dtype)
+                expected_bias = source.bias.detach().to(dtype)
+                model.eval()
+
+                convert_float_model(model, self._float_lut(kind), qtype=kind)
+
+                self.assertIs(type(model[0]), nn.Conv2d)
+                converted = model[1]
+                self.assertIsInstance(converted, layer_type)
+                self.assertEqual(converted.weight.dtype, dtype)
+                self.assertEqual(converted.bias.dtype, dtype)
+                self.assertEqual(converted.lut.dtype, torch.uint32)
+                self.assertIn(f"dtype={dtype}", repr(converted))
+                torch.testing.assert_close(converted.weight, expected_weight)
+                torch.testing.assert_close(converted.bias, expected_bias)
+                self.assertFalse(converted.bias.requires_grad)
+                self.assertFalse(converted.training)
+
+    def test_root_float_linear_is_returned(self):
+        source = nn.Linear(4, 3, bias=False)
+        expected = source.weight.detach().to(torch.float16)
+
+        converted = convert_float_model(
+            source, self._float_lut("fp16"), qtype="fp16"
+        )
+
+        self.assertIsInstance(converted, Linear_fp16)
+        self.assertIsNone(converted.bias)
+        torch.testing.assert_close(converted.weight, expected)
+
+    def test_shared_module_aliases_remain_shared(self):
+        int_model = nn.Module()
+        shared_conv = nn.Conv2d(2, 3, 1)
+        int_model.first = shared_conv
+        int_model.second = shared_conv
+        convert_int_model(
+            int_model,
+            self.lut,
+            qtype="int8",
+            ignore_first_conv=False,
+        )
+        self.assertIsInstance(int_model.first, Conv2d_int8)
+        self.assertIs(int_model.first, int_model.second)
+
+        float_model = nn.Module()
+        shared_linear = nn.Linear(4, 3)
+        float_model.first = shared_linear
+        float_model.second = shared_linear
+        convert_float_model(
+            float_model, self._float_lut("bf16"), qtype="bf16"
+        )
+        self.assertIsInstance(float_model.first, Linear_bf16)
+        self.assertIs(float_model.first, float_model.second)
 
     def test_float_grouped_conversion_is_rejected_without_partial_mutation(self):
         model = nn.Sequential(
@@ -181,7 +250,7 @@ class ConvertModelTest(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(NotImplementedError, "only groups=1"):
-            convert_model(
+            convert_float_model(
                 model,
                 self._float_lut("bf16"),
                 qtype="bf16",
@@ -198,7 +267,7 @@ class ConvertModelTest(unittest.TestCase):
         )
 
         with self.assertRaises(NotImplementedError):
-            convert_model(
+            convert_int_model(
                 model,
                 self.lut,
                 qtype="uint8",
@@ -212,9 +281,27 @@ class ConvertModelTest(unittest.TestCase):
         model = nn.Sequential(nn.Conv2d(1, 1, 1))
 
         with self.assertRaisesRegex(ValueError, "qtype"):
-            convert_model(model, self.lut, qtype="int4")
+            convert_int_model(model, self.lut, qtype="int4")
         with self.assertRaisesRegex(ValueError, "65536"):
-            convert_model(model, torch.zeros(10))
+            convert_int_model(model, torch.zeros(10))
+        with self.assertRaisesRegex(TypeError, "torch.float32"):
+            convert_int_model(
+                model, torch.zeros(256, 256, dtype=torch.int32)
+            )
+        with self.assertRaisesRegex(ValueError, "qtype"):
+            convert_float_model(model, self._float_lut("fp16"), qtype="int8")
+        with self.assertRaisesRegex(TypeError, "torch.uint32"):
+            convert_float_model(
+                model,
+                torch.zeros(128, 128, dtype=torch.uint16),
+                qtype="bf16",
+            )
+        with self.assertRaisesRegex(ValueError, "shape"):
+            convert_float_model(
+                model,
+                torch.zeros(10, 10, dtype=torch.uint32),
+                qtype="fp16",
+            )
 
 
 if __name__ == "__main__":

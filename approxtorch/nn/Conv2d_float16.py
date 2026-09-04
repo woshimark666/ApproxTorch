@@ -5,7 +5,10 @@ from __future__ import annotations
 import torch
 
 from . import bgemm_fp16
-from ._conv2d_float import ApproxConv2dFloat, conv2d_approx_float
+from ._conv2d_float import (
+    ApproxConv2dFloat16,
+    conv2d_approx_float,
+)
 
 
 __all__ = ["Conv2d_float16", "Conv2d_fp16", "conv2d_float16", "conv2d_fp16"]
@@ -38,7 +41,7 @@ def conv2d_float16(
     )
 
 
-class Conv2d_float16(ApproxConv2dFloat):
+class Conv2d_float16(ApproxConv2dFloat16):
     """Approximate FP16 convolution with an exact-convolution STE backward."""
 
     def __init__(

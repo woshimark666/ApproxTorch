@@ -25,7 +25,7 @@ mantissa LUTs for approximate **FP16 and BF16** GEMM and BGEMM.
   - **LRE** — linear-regression-estimated gradient LUTs
   - **Custom** — one derivative for every quantized `(x, w)` pair
 - ⚖️ **EMA quantization**: per-tensor activation scale and per-channel weight scale are EMA-updated during training, with arbitrary weight bit-width (**3–8 bit**) for int8 weights.
-- 🔌 **One-line model conversion**: `at.convert_model(model, lut)` replaces selected `nn.Conv2d` layers with approximate layers.
+- 🔌 **Separated model conversion**: `at.convert_int_model(...)` handles integer Conv2d; `at.convert_float_model(...)` handles FP16/BF16 Conv2d and Linear.
 - 🖥️ **Multi-GPU (DDP) support**: activation scales are synchronized across ranks automatically.
 
 ## Requirements
@@ -82,7 +82,7 @@ lut = at.load_lut.load_lut('test/exact_int8.txt', qtype='int8').to(
 
 # 2. take any FP32 model and replace its Conv2d layers with approximate ones
 model = resnet18(num_classes=10)
-model = at.convert_model(
+model = at.convert_int_model(
     model, lut,
     qtype='int8',             # 'int8' | 'uint8'
     grad='ste',               # gradient estimator: 'ste' | 'lre' | 'custom'
@@ -115,7 +115,7 @@ import approxtorch as at
 # LRE: per-row / per-column linear regression slopes
 grad_a, grad_b = at.grad_lut.lre('my_multiplier.txt', qtype='int8', save_path='my_mult')
 dx, dw = at.load_lut.load_lre_grad_lut('my_mult_lre_grad_a.txt', 'my_mult_lre_grad_b.txt')
-model = at.convert_model(model, lut, grad='lre', dx=dx.cuda(), dw=dw.cuda())
+model = at.convert_int_model(model, lut, grad='lre', dx=dx.cuda(), dw=dw.cuda())
 ```
 
 For a pair-wise custom gradient, `dx[x + 128, w + 128]` supplies the
@@ -124,7 +124,7 @@ derivative with respect to `w`:
 
 ```python
 dx, dw = at.load_lut.load_custom_grad_lut('custom_dx.txt', 'custom_dw.txt')
-model = at.convert_model(
+model = at.convert_int_model(
     model, lut, grad='custom',
     dx=dx.cuda(), dw=dw.cuda(),
 )
@@ -137,7 +137,7 @@ A smoothing + central-difference method (`at.grad_lut.DATE`) is also included fo
 ### Model conversion
 
 ```python
-at.convert_model(
+at.convert_int_model(
     model,                    # any nn.Module
     lut,                      # LUT tensor from at.load_lut.load_lut(...)
     qtype='int8',             # 'int8' | 'uint8'
@@ -150,12 +150,37 @@ at.convert_model(
 )
 ```
 
+Floating-point conversion has its own API and converts both Conv2d and Linear:
+
+```python
+# Generate these files once. Both FP16 and BF16 LUT tensors are uint32.
+# python tools/generate_float_mantissa_lut.py --kind all --format all \
+#     --output-dir /tmp/approxtorch-luts
+lut16 = at.float_lut.load_exact_lut(
+    "fp16", "cuda:0", directory="/tmp/approxtorch-luts"
+)
+model = at.convert_float_model(
+    model,
+    lut16,
+    qtype="fp16",             # "fp16" | "bf16"
+    ignore_first_conv=True,   # affects Conv2d only; every Linear is converted
+    optimized=True,
+).to(device="cuda", dtype=torch.float16)
+```
+
+The converted Conv2d and Linear weights and biases are nn.Parameter tensors in
+torch.float16 or torch.bfloat16, respectively. The converter does not cast
+unreplaced layers automatically, so cast the surrounding model and its inputs
+to a compatible dtype as shown above.
+
 ### Layers (`approxtorch.nn`)
 
 Approximate layers can also be used directly, just like their `torch.nn` counterparts:
 
 - `Conv2d_int8` — signed 8-bit approximate convolution
 - `Conv2d_uint8` — unsigned 8-bit approximate convolution
+- `Conv2d_fp16` / `Conv2d_bf16` — fixed-dtype approximate convolution
+- `Linear_fp16` / `Linear_bf16` — fixed-dtype approximate linear layer
 
 ### Calibration (`approxtorch.calib`)
 
@@ -193,8 +218,8 @@ approxtorch/
 │   └── csrc/
 │       ├── cuda/       # approximate (b)gemm, im2col, LUT lookup, backward kernels
 │       └── cpu/        # CPU reference implementations
-├── nn/                 # maintained approximate Conv2d layers (int8 / uint8)
-├── convert_model.py    # unified int8 / uint8 model conversion
+├── nn/                 # approximate integer and FP16/BF16 Conv2d/Linear layers
+├── convert_model.py    # split integer and FP16/BF16 model conversion
 ├── load_lut.py         # LUT and gradient-LUT loaders
 ├── grad_lut.py         # gradient LUT generation (LRE, DATE)
 ├── quant_utils.py      # calibration utilities
