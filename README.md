@@ -168,6 +168,18 @@ model = at.convert_float_model(
 ).to(device="cuda", dtype=torch.float16)
 ```
 
+For arbitrary approximate mantissa LUT files, the general loader accepts both
+short and long dtype names and returns a contiguous CPU uint32 tensor:
+
+```python
+lut16 = at.load_lut.load_lut("my_fp16_lut.bin", qtype="float16").cuda()
+lutb = at.load_lut.load_float_lut("my_bf16_lut.pt", qtype="bf16").cuda()
+```
+
+Supported inputs are whitespace-delimited text, raw little-endian uint32
+`.bin`, and PyTorch `.pt`/`.pth` tensors. Use `float_lut.load_exact_lut` when
+loading generated exact LUTs with manifest/hash verification.
+
 The converted Conv2d and Linear weights and biases are nn.Parameter tensors in
 torch.float16 or torch.bfloat16, respectively. The converter does not cast
 unreplaced layers automatically, so cast the surrounding model and its inputs
