@@ -1,3 +1,5 @@
+import os
+
 from setuptools import setup, Extension, find_packages
 from torch.utils.cpp_extension import CppExtension, CUDAExtension, BuildExtension, include_paths
 
@@ -18,6 +20,7 @@ cuda_functions = CUDAExtension('approxtorch.backend._C',[
         './approxtorch/backend/csrc/float/gemm_bf16.cu',
         './approxtorch/backend/csrc/float/bgemm_fp16.cu',
         './approxtorch/backend/csrc/float/bgemm_bf16.cu',
+        './approxtorch/backend/csrc/float/bf16_custom_grad.cu',
         './approxtorch/backend/csrc/float/col2im_bf16.cu',
         './approxtorch/backend/csrc/naive_cuda/gemm_naive.cu',
         './approxtorch/backend/csrc/naive_cuda/gemm_lre_naive.cu',
@@ -44,7 +47,10 @@ cuda_functions = CUDAExtension('approxtorch.backend._C',[
         './approxtorch/backend/csrc/cuda/elementwise_mul.cu',
     ],                   
     include_dirs = ['./approxtorch/backend/csrc/cuda'],
-    extra_compile_args={'nvcc': ['-arch=native', '-std=c++17', "-O3", "--split-compile=0"],
+    # Let PyTorch select explicit targets for builds without a visible GPU.
+    extra_compile_args={'nvcc': ([] if os.environ.get('TORCH_CUDA_ARCH_LIST')
+                                 else ['-arch=native']) +
+                                ['-std=c++17', "-O3", "--split-compile=0"],
                         "cxx": ["-O3","-fdiagnostics-color=always",
                                 "-DPy_LIMITED_API=0x03090000",  # min CPython version 3.9
                                 ]},

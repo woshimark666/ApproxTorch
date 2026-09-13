@@ -25,6 +25,11 @@ from .Linear_bfloat16 import (
     linear_bfloat16,
     linear_bf16,
 )
+from ._bf16_custom_grad import (
+    approx_mul_bf16_custom,
+    gemm_bf16_custom,
+    bgemm_bf16_custom,
+)
 from . import bgemm_int8
 from . import bgemm_uint8
 from . import bgemm_fp16

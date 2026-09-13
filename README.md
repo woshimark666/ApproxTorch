@@ -132,6 +132,72 @@ model = at.convert_int_model(
 
 A smoothing + central-difference method (`at.grad_lut.DATE`) is also included for research comparison.
 
+### BF16 mantissa gradient LUTs
+
+BF16 layers support a custom CUDA backward using two precomputed, fixed FP32
+gradient LUTs. Each tensor must be contiguous and one-dimensional with shape
+`[16384]`; both stay on the same CUDA device as the operands. Prepare and upload
+them once before training:
+
+```python
+device = torch.device("cuda")
+grad_x_lut = (
+    torch.load("bf16_grad_x.pt", map_location="cpu", weights_only=True)
+    .detach().float().reshape(-1).contiguous().to(device)
+)
+grad_w_lut = (
+    torch.load("bf16_grad_w.pt", map_location="cpu", weights_only=True)
+    .detach().float().reshape(-1).contiguous().to(device)
+)
+lutb = at.load_lut.load_float_lut("my_bf16_lut.pt", qtype="bf16").to(device)
+model = at.convert_float_model(
+    model, lutb, qtype="bf16", ignore_first_conv=False,
+    grad_x_lut=grad_x_lut, grad_w_lut=grad_w_lut,
+).to(device=device, dtype=torch.bfloat16)
+```
+
+Supplying both gradient LUTs selects custom gradients in BF16 Conv2d and Linear.
+Omitting both retains the existing STE. The same keyword arguments are accepted
+by `Conv2d_bf16`, `Linear_bf16`, `conv2d_bf16`, and `linear_bf16`; FP16 keeps its
+existing interface. Modules register the tables as buffers, preserve their FP32
+dtype when casting the model, and share already resident tensors. The forward
+mantissa LUT remains a separate uint32 tensor with shape `[128, 128]`, and the
+forward algorithm is unchanged.
+
+The flattened gradient index always keeps the input fraction first:
+
+```cpp
+index = ((bits_x & 0x7F) << 7) | (bits_w & 0x7F);
+```
+
+For normal BF16 operands, table entries are `df/dm_x` and `df/dm_w` for the
+approximate mantissa product `f(m_x, m_w)`. CUDA propagates
+
+\[
+g_x = g_{out}\,s_w\,2^{E_w-127}\,\mathrm{grad\_x\_lut}[index],\qquad
+g_w = g_{out}\,s_x\,2^{E_x-127}\,\mathrm{grad\_w\_lut}[index].
+\]
+
+Intermediate multiplication and reduction use FP32; returned gradients keep
+the BF16 operand shapes and dtype. GEMM and BGEMM sum over the existing
+contraction dimensions, including all batch and spatial positions for shared
+weights. Kernels only read the supplied gradient tables and do not generate or
+update them. This custom backward supports first-order gradients only.
+
+Special values follow the existing RTL convention: either signed-zero operand
+masks both propagated gradients to zero. Nonzero operands with exponent fields
+0 or 255 retain their raw fraction and use `E - 127`; no IEEE special-value
+propagation or flush-to-zero rule is added. The forward's eight-bit exponent
+wraparound remains unchanged. The exact-product gradient identity is tested for
+normal operands, for which `grad_x_lut[index] = 1 + F_w/128` and
+`grad_w_lut[index] = 1 + F_x/128`.
+
+Run the correctness tests after building the extension:
+
+```bash
+python -m pytest approxtorch/backend/csrc/float/test_bf16_custom_grad.py -q
+```
+
 ## API Overview
 
 ### Model conversion
@@ -220,6 +286,22 @@ from approxtorch.nn import bgemm_fp16, bgemm_bf16
 
 y16 = bgemm_fp16.bgemm_fp16_ste(x16, w16, lut16)
 yb = bgemm_bf16.bgemm_bf16_ste(xb, wb, lutb)
+```
+
+BF16 custom-gradient wrappers use the same forward operators and add the two
+flat FP32 gradient tables:
+
+```python
+from approxtorch.nn import (
+    approx_mul_bf16_custom, gemm_bf16_custom, bgemm_bf16_custom,
+)
+
+# Elementwise: x and w have the same shape.
+y = approx_mul_bf16_custom(x, w, lutb, grad_x_lut, grad_w_lut)
+# GEMM: A [M,K], B [K,O] -> [M,O].
+y = gemm_bf16_custom(A, B, lutb, grad_x_lut, grad_w_lut)
+# BGEMM: X [N,K,L], W [O,K] -> [N,O,L].
+y = bgemm_bf16_custom(X, W, lutb, grad_x_lut, grad_w_lut)
 ```
 
 ## Repository Layout

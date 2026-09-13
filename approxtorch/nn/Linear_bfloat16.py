@@ -10,6 +10,12 @@ from torch.autograd import Function
 
 from approxtorch.backend import ops
 
+from ._bf16_custom_grad import (
+    _FixedBFloat16GradientLUTs,
+    _validate_grad_luts,
+    gemm_bf16_custom,
+)
+
 
 __all__ = ["Linear_bfloat16", "Linear_bf16", "linear_bfloat16", "linear_bf16"]
 
@@ -118,25 +124,45 @@ def linear_bfloat16(
     lut: torch.Tensor,
     bias: torch.Tensor | None = None,
     optimized: bool = True,
+    *,
+    grad_x_lut: torch.Tensor | None = None,
+    grad_w_lut: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Apply an approximate BF16 linear transform with an exact-product STE."""
+    """Apply an approximate BF16 linear transform with STE or LUT gradients.
+
+    Supply both fixed CUDA FP32 ``[16384]`` gradient LUTs to select the
+    custom backward; omitting them preserves the exact-product STE.
+    """
     if not isinstance(optimized, bool):
         raise TypeError("optimized must be a bool")
     in_features, out_features = _validate_linear_tensors(
         input, weight, lut, bias
     )
-    input_2d = input.reshape(-1, in_features).contiguous()
-    output = _LinearBFloat16STE.apply(
-        input_2d, weight.contiguous(), lut, optimized
+    custom_gradient = _validate_grad_luts(
+        grad_x_lut, grad_w_lut, device=input.device
     )
+    input_2d = input.reshape(-1, in_features).contiguous()
+    if custom_gradient:
+        output = gemm_bf16_custom(
+            input_2d,
+            weight.transpose(0, 1).contiguous(),
+            lut,
+            grad_x_lut,
+            grad_w_lut,
+            optimized,
+        )
+    else:
+        output = _LinearBFloat16STE.apply(
+            input_2d, weight.contiguous(), lut, optimized
+        )
     output = output.reshape(*input.shape[:-1], out_features)
     if bias is not None:
         output = output + bias
     return output
 
 
-class Linear_bfloat16(nn.Module):
-    """Approximate BF16 Linear layer with an exact-product STE backward."""
+class Linear_bfloat16(_FixedBFloat16GradientLUTs, nn.Module):
+    """Approximate BF16 Linear layer with optional fixed FP32 gradient LUTs."""
 
     __constants__ = ["in_features", "out_features", "optimized"]
 
@@ -149,6 +175,9 @@ class Linear_bfloat16(nn.Module):
         optimized: bool = True,
         device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
+        *,
+        grad_x_lut: torch.Tensor | None = None,
+        grad_w_lut: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         if isinstance(in_features, bool) or not isinstance(in_features, int):
@@ -173,6 +202,7 @@ class Linear_bfloat16(nn.Module):
         target_device = torch.device(device) if device is not None else lut.device
         _validate_lut(lut, require_cuda=False)
         self.register_buffer("lut", lut.to(device=target_device))
+        self._register_grad_luts(grad_x_lut, grad_w_lut, device=target_device)
 
         factory_kwargs = {"device": target_device, "dtype": torch.bfloat16}
         self.weight = nn.Parameter(
@@ -218,6 +248,8 @@ class Linear_bfloat16(nn.Module):
             self.lut,
             self.bias,
             self.optimized,
+            grad_x_lut=self.grad_x_lut,
+            grad_w_lut=self.grad_w_lut,
         )
 
     def extra_repr(self) -> str:

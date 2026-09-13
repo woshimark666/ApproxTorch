@@ -5,8 +5,10 @@ from torch.autograd import Function
 
 import approxtorch as at
 
+from ._bf16_custom_grad import bgemm_bf16_custom
 
-__all__ = ["bgemm_bf16_ste"]
+
+__all__ = ["bgemm_bf16_ste", "bgemm_bf16_custom"]
 
 
 class _bgemm_bf16_base(Function):

@@ -13,6 +13,7 @@ from .nn import (
     Linear_bf16,
     Linear_fp16,
 )
+from .nn._bf16_custom_grad import _validate_grad_luts
 
 
 IntQType = Literal["int8", "uint8"]
@@ -25,11 +26,11 @@ __all__ = ["convert_int_model", "convert_float_model"]
 def _move_qparams_to_device(module: nn.Module, device: torch.device) -> None:
     """Keep generated quantization state beside the source layer's weights.
 
-    ``lut``, ``dx`` and ``dw`` deliberately stay on the device supplied by the
-    caller. This preserves the common workflow where a CPU model is converted
-    with CUDA LUTs and the whole model is moved to CUDA afterwards.
+    Externally supplied LUTs deliberately stay on their supplied device. This
+    preserves the common workflow where a CPU model is converted with CUDA
+    LUTs and the whole model is moved to CUDA afterwards.
     """
-    external_buffers = {"lut", "dx", "dw"}
+    external_buffers = {"lut", "dx", "dw", "grad_x_lut", "grad_w_lut"}
     for name, buffer in module._buffers.items():
         if buffer is not None and name not in external_buffers:
             module._buffers[name] = buffer.to(device=device)
@@ -295,7 +296,13 @@ def _make_float_module(
     lut: torch.Tensor,
     qtype: FloatQType,
     optimized: bool,
+    grad_x_lut: torch.Tensor | None,
+    grad_w_lut: torch.Tensor | None,
 ) -> nn.Module:
+    gradient_kwargs = (
+        {"grad_x_lut": grad_x_lut, "grad_w_lut": grad_w_lut}
+        if qtype == "bf16" else {}
+    )
     if isinstance(module, nn.Conv2d):
         if isinstance(module.padding, str):
             raise NotImplementedError(
@@ -320,6 +327,7 @@ def _make_float_module(
             dilation=module.dilation,
             groups=module.groups,
             optimized=optimized,
+            **gradient_kwargs,
         )
         _copy_conv_state(module, target, qtype)
         return target
@@ -331,6 +339,7 @@ def _make_float_module(
         lut,
         bias=module.bias is not None,
         optimized=optimized,
+        **gradient_kwargs,
     )
     _copy_linear_state(module, target)
     return target
@@ -342,6 +351,9 @@ def convert_float_model(
     qtype: FloatQType = "fp16",
     ignore_first_conv: bool = True,
     optimized: bool = True,
+    *,
+    grad_x_lut: torch.Tensor | None = None,
+    grad_w_lut: torch.Tensor | None = None,
 ) -> nn.Module:
     """Replace nn.Conv2d and nn.Linear with FP16/BF16 LUT layers.
 
@@ -349,6 +361,11 @@ def convert_float_model(
     ignore_first_conv affects only the first unique convolution; all Linear
     layers are converted. The function preserves shared-module aliases and
     builds every replacement before mutating model.
+
+    For BF16, supplying both fixed FP32 gradient LUTs with shape [16384]
+    selects the custom CUDA backward. Their row-major index is
+    (fraction_x << 7) | fraction_w. Omit both to retain the default STE.
+    Tables are shared by converted layers and remain on the LUT device.
 
     The surrounding model is not cast automatically. Its inputs and remaining
     floating-point layers must use a compatible dtype at execution time.
@@ -360,6 +377,11 @@ def convert_float_model(
     if qtype not in ("fp16", "bf16"):
         raise ValueError(f"qtype must be 'fp16' or 'bf16', got {qtype!r}")
     _validate_float_lut(lut, qtype)
+    if qtype != "bf16" and (grad_x_lut is not None or grad_w_lut is not None):
+        raise ValueError("gradient LUTs are supported only for qtype='bf16'")
+    _validate_grad_luts(
+        grad_x_lut, grad_w_lut, require_cuda=False, device=lut.device
+    )
     if not isinstance(ignore_first_conv, bool):
         raise TypeError("ignore_first_conv must be a bool")
     if not isinstance(optimized, bool):
@@ -382,7 +404,9 @@ def convert_float_model(
     ]
 
     replacements = {
-        id(module): _make_float_module(module, lut, qtype, optimized)
+        id(module): _make_float_module(
+            module, lut, qtype, optimized, grad_x_lut, grad_w_lut
+        )
         for module in selected
     }
     return _apply_replacements(model, references, replacements)

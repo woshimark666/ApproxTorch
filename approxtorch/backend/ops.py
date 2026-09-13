@@ -27,6 +27,9 @@ __all__ = ['im2col_int8',
            'bgemm_custom_grad_uint8_dw',
            'approx_mul_fp16',
            'approx_mul_bf16',
+           'approx_mul_bf16_backward',
+           'gemm_bf16_backward',
+           'bgemm_bf16_backward',
            'gemm_fp16_naive',
            'gemm_fp16',
            'gemm_bf16_naive',
@@ -294,6 +297,30 @@ def approx_mul_fp16(lhs: Tensor, rhs: Tensor, lut: Tensor) -> Tensor:
 
 def approx_mul_bf16(lhs: Tensor, rhs: Tensor, lut: Tensor) -> Tensor:
     return torch.ops.approxtorch.approx_mul_bf16.default(lhs, rhs, lut)
+
+
+def approx_mul_bf16_backward(
+        lhs: Tensor, rhs: Tensor, grad_output: Tensor,
+        grad_x_lut: Tensor, grad_w_lut: Tensor,
+        need_x: bool = True, need_w: bool = True) -> tuple[Tensor | None, Tensor | None]:
+    return torch.ops.approxtorch.approx_mul_bf16_backward.default(
+        lhs, rhs, grad_output, grad_x_lut, grad_w_lut, need_x, need_w)
+
+
+def gemm_bf16_backward(
+        A: Tensor, B: Tensor, grad_output: Tensor,
+        grad_x_lut: Tensor, grad_w_lut: Tensor,
+        need_x: bool = True, need_w: bool = True) -> tuple[Tensor | None, Tensor | None]:
+    return torch.ops.approxtorch.gemm_bf16_backward.default(
+        A, B, grad_output, grad_x_lut, grad_w_lut, need_x, need_w)
+
+
+def bgemm_bf16_backward(
+        X: Tensor, W: Tensor, grad_output: Tensor,
+        grad_x_lut: Tensor, grad_w_lut: Tensor,
+        need_x: bool = True, need_w: bool = True) -> tuple[Tensor | None, Tensor | None]:
+    return torch.ops.approxtorch.bgemm_bf16_backward.default(
+        X, W, grad_output, grad_x_lut, grad_w_lut, need_x, need_w)
 
 
 def gemm_fp16_naive(A: Tensor, B: Tensor, lut: Tensor) -> Tensor:
