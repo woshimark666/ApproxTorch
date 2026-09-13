@@ -14,6 +14,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ._unfold_bf16 import unfold_bf16
+
 
 _DTYPES = {"fp16": torch.float16, "bf16": torch.bfloat16}
 _LUT_SIDES = {"fp16": 1024, "bf16": 128}
@@ -155,7 +157,7 @@ def conv2d_approx_float(
     dilation = _pair_parameter(dilation, "dilation", allow_zero=False)
     (
         batch,
-        _,
+        in_channels,
         height,
         width,
         out_channels,
@@ -175,17 +177,54 @@ def conv2d_approx_float(
             f"({out_h}, {out_w})"
         )
 
-    columns = F.unfold(
-        input.contiguous(),
-        (kernel_h, kernel_w),
-        dilation=dilation,
-        padding=padding,
-        stride=stride,
-    )
+    if (
+        kind == "bf16"
+        and optimized
+        and kernel_h == kernel_w == 1
+        and stride == (1, 1)
+        and padding == (0, 0)
+        and height > 0
+        and width > 0
+        and not input.is_neg()
+    ):
+        # A pointwise convolution already has the BGEMM [N, K, L] layout.
+        # Explicit dimensions also support an empty batch. Dilation has no
+        # effect for a 1x1 kernel. Keep the usual contiguous copy for NHWC views.
+        columns = input.contiguous().view(batch, in_channels, height * width)
+        if (
+            torch.is_grad_enabled()
+            and weight.requires_grad
+            and input.is_contiguous()
+        ):
+            # The weight gradient needs an independent input snapshot. Preserve
+            # it when backward will need these columns, including callers that
+            # update the original input in-place between forward and backward.
+            columns = columns.clone()
+    else:
+        unfold = (
+            unfold_bf16
+            if kind == "bf16" and optimized and batch > 1
+            and torch.is_grad_enabled() and input.requires_grad
+            else F.unfold
+        )
+        columns = unfold(
+            input.contiguous(),
+            (kernel_h, kernel_w),
+            dilation=dilation,
+            padding=padding,
+            stride=stride,
+        )
     flat_weight = weight.reshape(out_channels, -1).contiguous()
-    output = bgemm(columns.contiguous(), flat_weight, lut, optimized).reshape(
-        batch, out_channels, out_h, out_w
-    )
+    output = bgemm(columns.contiguous(), flat_weight, lut, optimized)
+    if kind == "bf16" and optimized:
+        if bias is not None:
+            # BGEMM allocates this result and its STE saves only columns and
+            # weights. Add before making a view to avoid a CopySlices autograd
+            # node, while keeping the original two BF16 rounding steps.
+            output.add_(bias.view(1, -1, 1))
+        return output.reshape(batch, out_channels, out_h, out_w)
+
+    output = output.reshape(batch, out_channels, out_h, out_w)
     if bias is not None:
         output = output + bias.view(1, -1, 1, 1)
     return output

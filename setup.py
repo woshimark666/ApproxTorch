@@ -18,6 +18,7 @@ cuda_functions = CUDAExtension('approxtorch.backend._C',[
         './approxtorch/backend/csrc/float/gemm_bf16.cu',
         './approxtorch/backend/csrc/float/bgemm_fp16.cu',
         './approxtorch/backend/csrc/float/bgemm_bf16.cu',
+        './approxtorch/backend/csrc/float/col2im_bf16.cu',
         './approxtorch/backend/csrc/naive_cuda/gemm_naive.cu',
         './approxtorch/backend/csrc/naive_cuda/gemm_lre_naive.cu',
         './approxtorch/backend/csrc/naive_cuda/gemm_custom_grad_naive.cu',

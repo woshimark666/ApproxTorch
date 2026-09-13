@@ -25,7 +25,7 @@ def conv2d_bfloat16(
     groups: int = 1,
     optimized: bool = True,
 ) -> torch.Tensor:
-    """Apply approximate BF16 Conv2d using unfold and LUT BGEMM."""
+    """Apply approximate BF16 Conv2d using LUT BGEMM."""
     return conv2d_approx_float(
         input,
         weight,
