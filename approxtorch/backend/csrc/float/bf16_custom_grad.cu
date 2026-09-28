@@ -19,10 +19,6 @@ constexpr int kWarpSize = 32;
 using Gradients =
     std::tuple<std::optional<torch::Tensor>, std::optional<torch::Tensor>>;
 
-__device__ __forceinline__ bool zero_product(uint16_t x, uint16_t w) {
-  return (x & kMagnitudeMask) == 0 || (w & kMagnitudeMask) == 0;
-}
-
 __device__ __forceinline__ unsigned int gradient_index(uint16_t x, uint16_t w) {
   return ((x & kFractionMask) << kFractionBits) | (w & kFractionMask);
 }
@@ -52,14 +48,16 @@ __global__ void approx_mul_bf16_backward_kernel(
        i < count; i += static_cast<int64_t>(blockDim.x) * gridDim.x) {
     const uint16_t x = __bfloat16_as_ushort(X[i]);
     const uint16_t w = __bfloat16_as_ushort(W[i]);
-    // Differentiate the forward's constant-zero branch as zero for both
-    // operands, including -0. Do not read either LUT for this branch.
+    // A signed-zero operand uses fraction zero in its own derivative LUT.
+    // Only a zero opposite operand masks the partial, before multiplying dY.
+    const unsigned int index = gradient_index(x, w);
+    const float dy = static_cast<float>(dY[i]);
     float dx = 0.0f, dw = 0.0f;
-    if (!zero_product(x, w)) {
-      const unsigned int index = gradient_index(x, w);
-      const float dy = static_cast<float>(dY[i]);
-      if (dX) dx = dy * scale_partial(__ldg(dx_lut + index), w);
-      if (dW) dw = dy * scale_partial(__ldg(dw_lut + index), x);
+    if (dX && (w & kMagnitudeMask) != 0) {
+      dx = dy * scale_partial(__ldg(dx_lut + index), w);
+    }
+    if (dW && (x & kMagnitudeMask) != 0) {
+      dw = dy * scale_partial(__ldg(dw_lut + index), x);
     }
     if (dX) dX[i] = __float2bfloat16_rn(dx);
     if (dW) dW[i] = __float2bfloat16_rn(dw);
@@ -85,16 +83,14 @@ __global__ void bf16_backward_x_kernel(
     const int64_t n = gemm ? 0 : i / (K * L);
     const uint16_t x = __bfloat16_as_ushort(X[i]);
     float acc = 0.0f;
-    if ((x & kMagnitudeMask) != 0) {
-      // Same O contraction as the existing custom-gradient/STE BGEMM.
-      for (int64_t o = 0; o < O; ++o) {
-        const uint16_t w = __bfloat16_as_ushort(W[gemm ? k * O + o : o * K + k]);
-        if ((w & kMagnitudeMask) != 0) {
-          const float partial = scale_partial(
-              __ldg(dx_lut + gradient_index(x, w)), w);
-          const float dy = static_cast<float>(dY[gemm ? l * O + o : (n * O + o) * L + l]);
-          acc = __fadd_rn(acc, __fmul_rn(dy, partial));
-        }
+    // A zero X still receives the gradient from LUT row zero.
+    for (int64_t o = 0; o < O; ++o) {
+      const uint16_t w = __bfloat16_as_ushort(W[gemm ? k * O + o : o * K + k]);
+      if ((w & kMagnitudeMask) != 0) {
+        const float partial = scale_partial(
+            __ldg(dx_lut + gradient_index(x, w)), w);
+        const float dy = static_cast<float>(dY[gemm ? l * O + o : (n * O + o) * L + l]);
+        acc = __fadd_rn(acc, __fmul_rn(dy, partial));
       }
     }
     dX[i] = __float2bfloat16_rn(acc);
@@ -116,10 +112,7 @@ __global__ void bf16_backward_w_kernel(
   const int64_t k = gemm ? i / O : i % K;
   const int64_t o = gemm ? i % O : i / K;
   const uint16_t w = __bfloat16_as_ushort(W[i]);
-  if ((w & kMagnitudeMask) == 0) {
-    if (threadIdx.x == 0) dW[i] = __ushort_as_bfloat16(0);
-    return;
-  }
+  // A zero W still receives the gradient from LUT column zero.
   __shared__ float lut_column[1 << kFractionBits];
   __shared__ float warp_sums[kThreads / kWarpSize];
   if (threadIdx.x < (1 << kFractionBits)) {

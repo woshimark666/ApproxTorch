@@ -49,7 +49,7 @@ __global__ void bf16_gemm_backward_x_tiled_kernel(
     }
     __syncthreads();
 
-    if ((x & kMagnitudeMask) != 0) {
+    if (valid) {
 #pragma unroll
       for (int tile_o = 0; tile_o < kTileO; ++tile_o) {
         const uint16_t w = shared_w[tile_o][local_k];
@@ -83,25 +83,23 @@ __global__ void bf16_gemm_backward_x_warp_kernel(
   const int lane = threadIdx.x;
   const uint16_t x = __bfloat16_as_ushort(X[i]);
   float accumulator = 0.0f;
-  if ((x & kMagnitudeMask) != 0) {
-    const unsigned int row = (x & kFractionMask) << kFractionBits;
-    for (int64_t first_o = 0; first_o < O; first_o += kWarpSize) {
-      const int64_t o = first_o + lane;
-      const uint16_t w = o < O ? __bfloat16_as_ushort(W[k * O + o]) : 0;
-      const bool contributes = (w & kMagnitudeMask) != 0;
-      float product = 0.0f;
-      if (contributes) {
-        const float partial = scale_partial(
-            __ldg(dx_lut + row + (w & kFractionMask)), w);
-        product = __fmul_rn(static_cast<float>(dY[m * O + o]), partial);
-      }
-      const unsigned int active = __ballot_sync(0xffffffffu, contributes);
+  const unsigned int row = (x & kFractionMask) << kFractionBits;
+  for (int64_t first_o = 0; first_o < O; first_o += kWarpSize) {
+    const int64_t o = first_o + lane;
+    const uint16_t w = o < O ? __bfloat16_as_ushort(W[k * O + o]) : 0;
+    const bool contributes = (w & kMagnitudeMask) != 0;
+    float product = 0.0f;
+    if (contributes) {
+      const float partial = scale_partial(
+          __ldg(dx_lut + row + (w & kFractionMask)), w);
+      product = __fmul_rn(static_cast<float>(dY[m * O + o]), partial);
+    }
+    const unsigned int active = __ballot_sync(0xffffffffu, contributes);
 #pragma unroll
-      for (int source = 0; source < kWarpSize; ++source) {
-        const float term = __shfl_sync(0xffffffffu, product, source);
-        if (active & (1u << source)) {
-          accumulator = __fadd_rn(accumulator, term);
-        }
+    for (int source = 0; source < kWarpSize; ++source) {
+      const float term = __shfl_sync(0xffffffffu, product, source);
+      if (active & (1u << source)) {
+        accumulator = __fadd_rn(accumulator, term);
       }
     }
   }

@@ -131,8 +131,10 @@ def approx_mul_bf16_custom(x, w, lut, grad_x_lut, grad_w_lut):
 
     The forward uint32 LUT keeps its existing ``[128, 128]`` layout. Each
     gradient LUT is a fixed, contiguous CUDA FP32 tensor of shape ``[16384]``,
-    indexed by ``(fraction_x << 7) | fraction_w``. Higher derivatives are
-    unsupported. No LUT is copied or generated during forward or backward.
+    indexed by ``(fraction_x << 7) | fraction_w``. Signed-zero operands use
+    fraction zero in their own derivative LUT; only a zero opposite operand
+    masks each partial. Higher derivatives are unsupported. No LUT is copied
+    or generated during forward or backward.
     """
     return _ApproxMulBFloat16Custom.apply(x, w, lut, grad_x_lut, grad_w_lut)
 
@@ -149,7 +151,9 @@ def bgemm_bf16_custom(x, w, lut, grad_x_lut, grad_w_lut, optimized=True):
 
     Gradient LUTs are fixed CUDA FP32 ``[16384]`` buffers using the same
     ``(fraction_x << 7) | fraction_w`` index as elementwise multiplication.
-    Weight gradients reduce across the batch and spatial dimensions.
+    Signed-zero inputs/weights still use LUT row/column zero for their own
+    gradients; only a zero opposite operand masks each partial. Weight
+    gradients reduce across the batch and spatial dimensions.
     """
     if not isinstance(optimized, bool):
         raise TypeError("optimized must be a bool")

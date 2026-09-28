@@ -184,13 +184,22 @@ contraction dimensions, including all batch and spatial positions for shared
 weights. Kernels only read the supplied gradient tables and do not generate or
 update them. This custom backward supports first-order gradients only.
 
-Special values follow the existing RTL convention: either signed-zero operand
-masks both propagated gradients to zero. Nonzero operands with exponent fields
-0 or 255 retain their raw fraction and use `E - 127`; no IEEE special-value
-propagation or flush-to-zero rule is added. The forward's eight-bit exponent
-wraparound remains unchanged. The exact-product gradient identity is tested for
-normal operands, for which `grad_x_lut[index] = 1 + F_w/128` and
-`grad_w_lut[index] = 1 + F_x/128`.
+Signed-zero operands still select fraction zero in the gradient LUTs:
+when `x` is zero and `w` is nonzero, `g_x` uses `grad_x_lut[0, F_w]` with
+`w`'s sign and exponent scale; when `w` is zero and `x` is nonzero, `g_w`
+uses `grad_w_lut[F_x, 0]` with `x`'s sign and exponent scale (indices here
+show the logical 128x128 layout). Only a zero **opposite** operand masks a
+partial: `w == 0` makes `g_x = 0`, and `x == 0` makes `g_w = 0`, before
+multiplying by the upstream gradient. Both partials are zero when both
+operands are zero. This extends the LUT gradient rule to zero; it does not
+fall back to the exact-product derivative. Forward signed-zero handling is
+unchanged.
+
+Nonzero operands with exponent fields 0 or 255 retain their raw fraction and
+use `E - 127`; no IEEE special-value propagation or flush-to-zero rule is
+added. The forward's eight-bit exponent wraparound remains unchanged. The
+exact-product gradient identity is tested for normal and zero operands using
+`grad_x_lut[index] = 1 + F_w/128` and `grad_w_lut[index] = 1 + F_x/128`.
 
 Run the correctness tests after building the extension:
 

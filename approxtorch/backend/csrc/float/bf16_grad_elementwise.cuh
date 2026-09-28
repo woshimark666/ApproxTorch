@@ -41,13 +41,15 @@ __global__ void approx_mul_bf16_backward_packed_kernel(
     for (int lane = 0; lane < 2; ++lane) {
       const uint16_t x = static_cast<uint16_t>(xs >> (16 * lane));
       const uint16_t w = static_cast<uint16_t>(ws >> (16 * lane));
-      if ((x & kMagnitudeMask) != 0 && (w & kMagnitudeMask) != 0) {
-        const unsigned int index =
-            ((x & kFractionMask) << kFractionBits) | (w & kFractionMask);
-        if constexpr (need_x) {
+      const unsigned int index =
+          ((x & kFractionMask) << kFractionBits) | (w & kFractionMask);
+      if constexpr (need_x) {
+        if ((w & kMagnitudeMask) != 0) {
           dx[lane] = dy[lane] * scale_partial_fast(__ldg(dx_lut + index), w);
         }
-        if constexpr (need_w) {
+      }
+      if constexpr (need_w) {
+        if ((x & kMagnitudeMask) != 0) {
           dw[lane] = dy[lane] * scale_partial_fast(__ldg(dw_lut + index), x);
         }
       }
@@ -64,12 +66,18 @@ __global__ void approx_mul_bf16_backward_packed_kernel(
     const uint16_t x = __bfloat16_as_ushort(X[i]);
     const uint16_t w = __bfloat16_as_ushort(W[i]);
     float dx = 0.0f, dw = 0.0f;
-    if ((x & kMagnitudeMask) != 0 && (w & kMagnitudeMask) != 0) {
-      const unsigned int index =
-          ((x & kFractionMask) << kFractionBits) | (w & kFractionMask);
-      const float dy = static_cast<float>(dY[i]);
-      if constexpr (need_x) dx = dy * scale_partial_fast(__ldg(dx_lut + index), w);
-      if constexpr (need_w) dw = dy * scale_partial_fast(__ldg(dw_lut + index), x);
+    const unsigned int index =
+        ((x & kFractionMask) << kFractionBits) | (w & kFractionMask);
+    const float dy = static_cast<float>(dY[i]);
+    if constexpr (need_x) {
+      if ((w & kMagnitudeMask) != 0) {
+        dx = dy * scale_partial_fast(__ldg(dx_lut + index), w);
+      }
+    }
+    if constexpr (need_w) {
+      if ((x & kMagnitudeMask) != 0) {
+        dw = dy * scale_partial_fast(__ldg(dw_lut + index), x);
+      }
     }
     if constexpr (need_x) dX[i] = __float2bfloat16_rn(dx);
     if constexpr (need_w) dW[i] = __float2bfloat16_rn(dw);

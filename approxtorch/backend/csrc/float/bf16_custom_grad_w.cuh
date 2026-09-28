@@ -20,28 +20,19 @@ __global__ void bf16_backward_w_tiled_kernel(
   const int64_t k = blockIdx.x / groups;
   const int64_t first_o = (blockIdx.x % groups) * kOutputs;
   uint16_t weights[kOutputs];
-  bool any_nonzero = false;
 #pragma unroll
   for (int j = 0; j < kOutputs; ++j) {
     const int64_t o = first_o + j;
     weights[j] = o < O
         ? __bfloat16_as_ushort(W[gemm ? k * O + o : o * K + k])
         : 0;
-    any_nonzero |= (weights[j] & kMagnitudeMask) != 0;
-  }
-  if (!any_nonzero) {
-    if (threadIdx.x < kOutputs && first_o + threadIdx.x < O) {
-      const int64_t o = first_o + threadIdx.x;
-      dW[gemm ? k * O + o : o * K + k] = __ushort_as_bfloat16(0);
-    }
-    return;
   }
   __shared__ float columns[kOutputs][1 << kFractionBits];
   __shared__ float warp_sums[kOutputs][kThreads / kWarpSize];
   for (int p = threadIdx.x; p < kOutputs * (1 << kFractionBits); p += kThreads) {
     const int j = p >> kFractionBits;
     const int fraction = p & kFractionMask;
-    columns[j][fraction] = (weights[j] & kMagnitudeMask) != 0
+    columns[j][fraction] = first_o + j < O
         ? __ldg(dw_lut + (transposed_lut
               ? ((weights[j] & kFractionMask) << kFractionBits) + fraction
               : (fraction << kFractionBits) + (weights[j] & kFractionMask)))
@@ -59,7 +50,7 @@ __global__ void bf16_backward_w_tiled_kernel(
     if ((x & kMagnitudeMask) != 0) {
 #pragma unroll
       for (int j = 0; j < kOutputs; ++j) {
-        if ((weights[j] & kMagnitudeMask) != 0) {
+        if (first_o + j < O) {
           const int64_t o = first_o + j;
           const float partial = scale_partial(columns[j][x & kFractionMask], x);
           const float dy = static_cast<float>(
@@ -131,10 +122,6 @@ __global__ void bf16_backward_w_warp_kernel(
   const int64_t k = gemm ? i / O : i % K;
   const int64_t o = gemm ? i % O : i / K;
   const uint16_t w = __bfloat16_as_ushort(W[i]);
-  if ((w & kMagnitudeMask) == 0) {
-    if (lane == 0) dW[i] = __ushort_as_bfloat16(0);
-    return;
-  }
   __shared__ float columns[kWarps][1 << kFractionBits];
 #pragma unroll
   for (int m = lane; m < (1 << kFractionBits); m += kWarpSize) {

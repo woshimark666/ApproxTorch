@@ -65,8 +65,16 @@ def pair_partials(x, w, dx_lut, dw_lut):
     dw = torch.ldexp(dw_lut[index].double(), ((xb >> 7) & 255) - 127)
     dx = torch.where((wb & 0x8000) != 0, -dx, dx).float()
     dw = torch.where((xb & 0x8000) != 0, -dw, dw).float()
-    nonzero = ((xb & 0x7FFF) != 0) & ((wb & 0x7FFF) != 0)
-    return torch.where(nonzero, dx, 0.0), torch.where(nonzero, dw, 0.0)
+    # A zero operand still selects fraction zero in its own derivative LUT.
+    # Only the opposite operand supplies the zero scale for each partial.
+    return (torch.where((wb & 0x7FFF) != 0, dx, 0.0),
+            torch.where((xb & 0x7FFF) != 0, dw, 0.0))
+
+
+def with_signed_zeros(tensor):
+    tensor.view(-1)[::7] = 0.0
+    tensor.view(-1)[1::7] = -0.0
+    return tensor
 
 
 def assert_gradient(actual, expected):
@@ -80,6 +88,8 @@ def assert_gradient(actual, expected):
 def test_exact_luts_match_pytorch_multiply_backward():
     x = normal_values((4096,), 1, exponent_low=100, exponent_high=150)
     w = normal_values(x.shape, 2, exponent_low=100, exponent_high=150)
+    with_signed_zeros(x)
+    w[3::7], w[4::7] = 0.0, -0.0
     x.requires_grad_()
     w.requires_grad_()
     grad_output = normal_values(x.shape, 3)
@@ -110,19 +120,22 @@ def test_asymmetric_luts_all_fraction_pairs_and_signed_exponents():
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("offset", [0, 1], ids=["aligned", "odd-storage-offset"])
 @pytest.mark.parametrize("need_x,need_w", [(True, True), (True, False), (False, True)])
-def test_large_elementwise_pairs_tail_and_unaligned_fallback(dtype, offset, need_x, need_w):
+@pytest.mark.parametrize("zero_tail", ["x", "w"])
+def test_large_elementwise_pairs_tail_and_unaligned_fallback(dtype, offset, need_x, need_w, zero_tail):
     # Exercise the packed launch threshold, its scalar final element, and the
     # scalar fallback for a contiguous view with an unaligned BF16 address.
     count = 2 ** 20 + 1
     x = normal_values((count + offset,), 41)[offset:]
     w = normal_values((count + offset,), 42)[offset:]
+    with_signed_zeros(x)
+    w[3::7], w[4::7] = 0.0, -0.0
     g = (normal_values((count + offset,), 43).float() + 0.1234567).to(dtype)[offset:]
     assert x.is_contiguous() and x.storage_offset() == offset
     assert x.data_ptr() % 4 == 2 * offset
-    # Give the odd final element a distinct sign, exponent, and fraction so
-    # accidentally omitting or duplicating the scalar tail cannot pass.
+    # The packed scalar tail must also propagate through a signed zero.
     x[-1] = bf16_bits(0xBDAB)
     w[-1] = bf16_bits(0x40F1)
+    (x if zero_tail == "x" else w)[-1] = -0.0
     g[-1] = -0.8125
     gx, gw = gradient_luts("cuda", exact=False)
     actual = ops.approx_mul_bf16_backward(x, w, g, gx, gw, need_x, need_w)
@@ -147,12 +160,35 @@ def test_special_values_follow_raw_fields_and_zero_branch():
     for got, want in zip(actual, pair_partials(x, w, gx, gw)):
         torch.testing.assert_close(got, want.bfloat16(), rtol=0, atol=0)
 
-    zero_x = bf16_bits([0, 0x8000, 0x3F80, 0xBF80])
-    zero_w = bf16_bits([0x3F80, 0xBF80, 0, 0x8000])
-    g = bf16_bits([0x7F80, 0x7FC1, 0xFF80, 0x7FC1])
+    zero_x = bf16_bits([0, 0x8000, 0x3F80, 0xBF80, 0, 0x8000])
+    zero_w = bf16_bits([0x3F80, 0xBF80, 0, 0x8000, 0x8000, 0])
+    g = bf16_bits([0x7F80, 0x7FC1, 0xFF80, 0x7FC1, 0x7F80, 0x7FC1])
     actual = ops.approx_mul_bf16_backward(zero_x, zero_w, g, gx, gw)
-    for got in actual:
-        assert torch.count_nonzero(got.view(torch.int16)).item() == 0
+    expected = ([float("inf"), float("nan"), 0, 0, 0, 0],
+                [0, 0, -float("inf"), float("nan"), 0, 0])
+    for got, values in zip(actual, expected):
+        want = torch.tensor(values, device="cuda", dtype=torch.bfloat16)
+        torch.testing.assert_close(got, want, rtol=0, atol=0, equal_nan=True)
+        assert torch.count_nonzero(got[want == 0].view(torch.int16)).item() == 0
+
+
+@cuda
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_signed_zeros_use_custom_lut_row_and_column(dtype):
+    x = bf16_bits([0, 0x8000, 0x4040, 0xC040, 0, 0x8000, 0, 0x8000])
+    w = bf16_bits([0x4040, 0xC040, 0, 0x8000, 0, 0, 0x8000, 0x8000])
+    g = torch.arange(2, 10, device="cuda", dtype=dtype)
+    # 3 = 2 * (1 + 64/128). Only these entries may affect the result;
+    # NaNs elsewhere detect wrong indices and use of zero-scale partials.
+    gx = torch.full((16384,), float("nan"), device="cuda")
+    gw = torch.full_like(gx, float("nan"))
+    gx[64] = 0.375
+    gw[64 * 128] = -0.625
+    dx, dw = ops.approx_mul_bf16_backward(x, w, g, gx, gw)
+    expected_x = torch.tensor([1.5, -2.25, 0, 0, 0, 0, 0, 0], device="cuda").bfloat16()
+    expected_w = torch.tensor([0, 0, -5, 6.25, 0, 0, 0, 0], device="cuda").bfloat16()
+    torch.testing.assert_close(dx, expected_x, rtol=0, atol=0)
+    torch.testing.assert_close(dw, expected_w, rtol=0, atol=0)
 
 
 @cuda
@@ -163,8 +199,8 @@ def test_matrix_backward_reductions_and_forward_parity(kind, optimized, exact):
     gx, gw = gradient_luts("cuda", exact=exact)
     lut = forward_lut("cuda")
     if kind == "gemm":
-        x = normal_values((3, 5), 5).requires_grad_()
-        w = normal_values((5, 35), 6).requires_grad_()
+        x = with_signed_zeros(normal_values((3, 5), 5)).requires_grad_()
+        w = with_signed_zeros(normal_values((5, 35), 6)).requires_grad_()
         g = normal_values((3, 35), 7)
         custom = gemm_bf16_custom
         forward = ops.gemm_bf16 if optimized else ops.gemm_bf16_naive
@@ -173,8 +209,8 @@ def test_matrix_backward_reductions_and_forward_parity(kind, optimized, exact):
                     (g.float()[:, None, :] * dw).sum(0))
     else:
         # N*L exceeds the 256-thread weight block, including a partial tail.
-        x = normal_values((3, 5, 97), 5).requires_grad_()
-        w = normal_values((7, 5), 6).requires_grad_()
+        x = with_signed_zeros(normal_values((3, 5, 97), 5)).requires_grad_()
+        w = with_signed_zeros(normal_values((7, 5), 6)).requires_grad_()
         g = normal_values((3, 7, 97), 7)
         custom = bgemm_bf16_custom
         forward = ops.bgemm_bf16 if optimized else ops.bgemm_bf16_naive
@@ -219,11 +255,44 @@ def test_matrix_optimized_layouts_match_bit_field_reference(kind, xs, ws, gs, dt
     # Non-multiple dimensions cover the output-channel, K, spatial, and warp
     # tails across the small and large reduction paths. Each LUT depends on
     # both operands, so swapping rows/columns or the two tables is observable.
-    x, w = normal_values(xs, 44), normal_values(ws, 45)
+    x = with_signed_zeros(normal_values(xs, 44))
+    w = with_signed_zeros(normal_values(ws, 45))
     g = (normal_values(gs, 46).float() + 0.1234567).to(dtype)
     gx, gw = gradient_luts("cuda", exact=False)
     actual = getattr(ops, f"{kind}_bf16_backward")(x, w, g, gx, gw)
     for got, want in zip(actual, matrix_partials_reference(kind, x, w, g, gx, gw)):
+        assert_gradient(got, want)
+
+
+@cuda
+@pytest.mark.parametrize("zero_operand", ["x", "w", "both"])
+@pytest.mark.parametrize("kind,xs,ws,gs", [
+    pytest.param("gemm", (67, 33), (33, 33), (67, 33), id="gemm-tiled-w"),
+    pytest.param("bgemm", (2, 129, 513), (65, 129), (2, 65, 513), id="bgemm-tiled-w"),
+    pytest.param("bgemm", (1, 65, 4033), (33, 65), (1, 33, 4033), id="bgemm-register-x-4"),
+    pytest.param("bgemm", (1, 65, 4033), (129, 65), (1, 129, 4033), id="bgemm-register-x-2"),
+])
+def test_matrix_all_zero_operands_use_luts(kind, xs, ws, gs, zero_operand):
+    x, w = normal_values(xs, 50), normal_values(ws, 51)
+    for name, operand in (("x", x), ("w", w)):
+        if zero_operand in (name, "both"):
+            operand.zero_()
+            operand.view(-1)[::2] = -0.0
+    g = normal_values(gs, 52).float()
+    gx, gw = gradient_luts("cuda", exact=False)
+    expected_x, expected_w = torch.zeros_like(x), torch.zeros_like(w)
+    # All-zero operands make one partial independent of the reduction index.
+    # Avoid materializing the large [N,O,K,L] derivative tensor.
+    if zero_operand == "x":
+        partial, _ = pair_partials(torch.zeros_like(w), w, gx, gw)
+        expected_x = (g @ partial.t() if kind == "gemm" else
+                      torch.einsum("nol,ok->nkl", g, partial))
+    elif zero_operand == "w":
+        _, partial = pair_partials(x, torch.zeros_like(x), gx, gw)
+        expected_w = (partial.t() @ g if kind == "gemm" else
+                      torch.einsum("nol,nkl->ok", g, partial))
+    actual = getattr(ops, f"{kind}_bf16_backward")(x, w, g, gx, gw)
+    for got, want in zip(actual, (expected_x, expected_w)):
         assert_gradient(got, want)
 
 
@@ -258,7 +327,9 @@ def test_only_requested_gradients(kind, need_x, need_w):
               "gemm": ((3, 5), (5, 7), (3, 7)),
               "bgemm": ((2, 5, 7), (3, 5), (2, 3, 7))}
     xs, ws, gs = shapes[kind]
-    x, w, g = normal_values(xs, 8), normal_values(ws, 9), normal_values(gs, 10)
+    x = with_signed_zeros(normal_values(xs, 8))
+    w = with_signed_zeros(normal_values(ws, 9))
+    g = normal_values(gs, 10)
     gx, gw = gradient_luts("cuda", exact=False)
     backward = getattr(ops, f"{kind}_bf16_backward")
     expected = backward(x, w, g, gx, gw)
@@ -341,19 +412,18 @@ def test_layers_exact_gradient_and_unchanged_forward(kind, optimized):
     if kind == "linear":
         module = Linear_bfloat16(5, 7, lut, optimized=optimized,
                                 grad_x_lut=gx, grad_w_lut=gw)
-        x = normal_values((2, 3, 5), 11).requires_grad_()
+        x = with_signed_zeros(normal_values((2, 3, 5), 11)).requires_grad_()
         forward, reference = linear_bfloat16, F.linear
     else:
-        # No overlap or padded zeros: the existing BF16 col2im rounding does
-        # not introduce a second reduction roundoff in this comparison.
+        # No overlap: BF16 col2im adds no second reduction roundoff here.
         module = Conv2d_bfloat16(2, 3, 2, lut, stride=2, optimized=optimized,
                                 grad_x_lut=gx, grad_w_lut=gw)
-        x = normal_values((2, 2, 6, 8), 11).requires_grad_()
+        x = with_signed_zeros(normal_values((2, 2, 6, 8), 11)).requires_grad_()
         forward = lambda a, w, table, b, **kw: conv2d_bfloat16(
             a, w, table, b, stride=2, **kw)
         reference = lambda a, w, b: F.conv2d(a, w, b, stride=2)
     with torch.no_grad():
-        module.weight.copy_(normal_values(module.weight.shape, 12))
+        module.weight.copy_(with_signed_zeros(normal_values(module.weight.shape, 12)))
         module.bias.copy_(normal_values(module.bias.shape, 13))
     output = module(x)
     old_output = forward(x, module.weight, lut, module.bias, optimized=optimized)

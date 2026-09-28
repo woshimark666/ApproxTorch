@@ -28,7 +28,7 @@ __global__ void bf16_bgemm_backward_x_register_kernel(
       if ((w & kMagnitudeMask) != 0) {
 #pragma unroll
         for (int v = 0; v < values_per_thread; ++v) {
-          if ((x[v] & kMagnitudeMask) != 0) {
+          if (first_l + v < L) {
             const float partial = scale_partial(__ldg(dx_lut + gradient_index(x[v], w)), w);
             const float dy = static_cast<float>(dY[(n * O + o) * L + first_l + v]);
             acc[v] = __fadd_rn(acc[v], __fmul_rn(dy, partial));
@@ -83,7 +83,7 @@ __global__ void bf16_bgemm_backward_x_tiled_kernel(
           ? static_cast<float>(dY[(n * O + first_o + o) * L + first_l + ll]) : 0.0f;
     }
     __syncthreads();
-    if ((x & kMagnitudeMask) != 0) {
+    if (valid) {
 #pragma unroll
       for (int o = 0; o < o_tile; ++o) {
         const uint16_t w = shared_w[o][local_k];
