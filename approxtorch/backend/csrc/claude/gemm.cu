@@ -28,7 +28,7 @@
 // forced, and only min(M, N) > ~524k is rejected outright (TORCH_CHECK).
 //
 // Degenerate shapes are handled, not crashed on: M == 0 / N == 0 return an
-// empty y before any launch; K == 0 runs the main kernel with an empty
+// empty y without launching the main kernel; K == 0 runs it with an empty
 // k-range and writes exact zeros.
 //
 // _cfg variants: cfg -1 = auto, 0..18 = force XMK with that tile config,
@@ -45,7 +45,6 @@ using claude_bgemm::ceil_div;
 using claude_bgemm::ptr_aligned;
 using claude_bgemm::quantize_one;
 using claude_bgemm::quantize_to_u8_kernel;
-using claude_bgemm::prepare_lut_kernel;
 using claude_bgemm::LaunchArgs;
 using claude_bgemm::dispatch_cfg;
 using claude_bgemm::pick_cfg_sflat;
@@ -106,6 +105,8 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> gemm_forward_save
     TORCH_CHECK(A.is_cuda(), "A must be a CUDA tensor");
     TORCH_CHECK(B.is_cuda(), "B must be a CUDA tensor");
     TORCH_CHECK(lut.is_cuda(), "lut must be a CUDA tensor");
+    TORCH_CHECK(A.device() == B.device() && A.device() == lut.device(),
+                "A, B and lut must be on the same CUDA device");
     TORCH_CHECK(A.scalar_type() == torch::kFloat32
                 || A.scalar_type() == torch::kByte,
                 "A must be float32 or uint8 (LUT indices)");
@@ -166,11 +167,6 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> gemm_forward_save
     }
 
     auto y = torch::empty({M, N}, f32opts);
-    if (y.numel() == 0) {           // M == 0 or N == 0: nothing to launch
-        CHECK_CUDA_ERROR();
-        return std::make_tuple(y, aq, bq);
-    }
-
     // ---- orientation ----
     // swapped=false: XMK  rows=M cols=N (warp along N)
     // swapped=true:  SFLAT rows=N cols=M (warp along M), transposed LUT
@@ -192,32 +188,20 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> gemm_forward_save
     if (!swapped && !xmk_fits) { swapped = true;  c = -1; }
     if (swapped && !swap_fits) { swapped = false; c = -1; }
 
-    // ---- LUT images (16-bit dual-interpretation + validity flags) ----
-    auto lut16 = torch::empty({256 * 256}, u8opts.dtype(torch::kInt16));
-    auto lut16_bad = torch::zeros({2}, u8opts.dtype(torch::kInt32));
-    auto lutc = lut.contiguous();
-    torch::Tensor lutT;   // keep alive until the kernel runs
+    auto prepared = approxtorch_integer::prepare(lut, swapped, stream);
 
     LaunchArgs a{
-        nullptr, nullptr, lutc.data_ptr<float>(),
-        lut16.data_ptr<short>(), lut16_bad.data_ptr<int>(),
+        nullptr, nullptr, prepared.values.data_ptr<int32_t>(),
+        prepared.values16.data_ptr<short>(), prepared.bad.data_ptr<int>(),
         y.data_ptr<float>(),
         K, 0, 0, /*L=*/1, /*O=*/N, f32opts, stream.stream()
     };
 
     if (swapped) {
-        lutT = torch::empty_like(lutc);
-        prepare_lut_kernel<true><<<256, 256, 0, stream>>>(
-            lutc.data_ptr<float>(), lutT.data_ptr<float>(),
-            lut16.data_ptr<short>(), lut16_bad.data_ptr<int>());
-        a.lut = lutT.data_ptr<float>();
         a.rowsrc = bq.data_ptr<uint8_t>();
         a.colsrc = aq.data_ptr<uint8_t>();
         a.R = N; a.C = M;
     } else {
-        prepare_lut_kernel<false><<<256, 256, 0, stream>>>(
-            lutc.data_ptr<float>(), nullptr,
-            lut16.data_ptr<short>(), lut16_bad.data_ptr<int>());
         a.rowsrc = aq.data_ptr<uint8_t>();
         a.colsrc = bq.data_ptr<uint8_t>();
         a.R = M; a.C = N;
@@ -227,7 +211,7 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> gemm_forward_save
     if (swapped) dispatch_cfg<SFLAT>(c, a);
     else         dispatch_cfg<XMK>(c, a);
 
-    CHECK_CUDA_ERROR();
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return std::make_tuple(y, aq, bq);
 }
 

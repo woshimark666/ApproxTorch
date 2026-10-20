@@ -175,7 +175,13 @@ def bgemm_fake_int8_gpt(X: Tensor, W: Tensor, lut: Tensor) -> Tensor:
     return torch.ops.approxtorch.bgemm_fake_int8_forward_cuda.default(X, W, lut)
 
 
-# claude-optimized forward, bit-identical to bgemm_fake_int8_gpt (csrc/claude/NOTES.md)
+# Integer forward contract (Claude GEMM/BGEMM/depthwise and GPT reference):
+# LUT storage is float32, but every value must be a finite INT32-range integer.
+# Accumulators and split-K workspace/reduction are INT32 (two's-complement wrap);
+# only the final output is converted to float32. Validation synchronizes the
+# current CUDA stream and raises RuntimeError for invalid LUTs. Gradient LUTs
+# and backward accumulation remain float32 and may contain fractional values.
+# Claude is bit-identical to bgemm_fake_int8_gpt for the same quantized inputs.
 def bgemm_fake_int8_claude(X: Tensor, W: Tensor, lut: Tensor) -> Tensor:
     return torch.ops.approxtorch.bgemm_fake_int8_forward_cuda_claude.default(X, W, lut)
 

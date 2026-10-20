@@ -3,8 +3,20 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
 
 namespace approxtorch {
+
+static void check_backward_devices(const torch::Tensor& X, const torch::Tensor& W,
+                                   const torch::Tensor& dY, const torch::Tensor& lut) {
+    TORCH_CHECK(X.is_cuda() && W.is_cuda() && dY.is_cuda() && lut.is_cuda(),
+                "X, W, dY and gradient LUT must all be CUDA tensors");
+    TORCH_CHECK(X.device() == W.device() && X.device() == dY.device()
+                && X.device() == lut.device(),
+                "X, W, dY and gradient LUT must be on the same CUDA device");
+    TORCH_CHECK(X.dim() == 3 && W.dim() == 2 && dY.dim() == 3,
+                "expected X [N,K,L], W [O,K], dY [N,O,L]");
+}
 
 // ============================================================================
 // grad_X kernel — shared memory tiling over O
@@ -215,7 +227,8 @@ torch::Tensor bgemm_custom_grad_uint8_dx(
     torch::Tensor dY,      // (N, O, L) float32
     torch::Tensor dx_lut   // (65536,) float32
 ) {
-    TORCH_CHECK(X.is_cuda() && W.is_cuda() && dY.is_cuda());
+    check_backward_devices(X, W, dY, dx_lut);
+    const at::cuda::OptionalCUDAGuard device_guard(device_of(X));
     TORCH_CHECK(X.dtype() == torch::kUInt8);
     TORCH_CHECK(W.dtype() == torch::kUInt8);
     TORCH_CHECK(dY.dtype() == torch::kFloat32);
@@ -237,6 +250,8 @@ torch::Tensor bgemm_custom_grad_uint8_dx(
 
     auto grad_X = torch::empty({N, CKK, L}, torch::dtype(torch::kFloat32).device(X.device()));
 
+    if (grad_X.numel() == 0) return grad_X;
+
     dim3 block(DX_TILE_L, DX_TILE_CKK);  // (64, 4) = 256 threads
     dim3 grid(
         (L   + DX_TILE_L   - 1) / DX_TILE_L,
@@ -253,6 +268,7 @@ torch::Tensor bgemm_custom_grad_uint8_dx(
         N, CKK, O, L
     );
 
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return grad_X;
 }
 
@@ -262,7 +278,8 @@ torch::Tensor bgemm_custom_grad_uint8_dw(
     torch::Tensor dY,      // (N, O, L) float32
     torch::Tensor dw_lut   // (65536,) float32
 ) {
-    TORCH_CHECK(X.is_cuda() && W.is_cuda() && dY.is_cuda());
+    check_backward_devices(X, W, dY, dw_lut);
+    const at::cuda::OptionalCUDAGuard device_guard(device_of(X));
     TORCH_CHECK(X.dtype() == torch::kUInt8);
     TORCH_CHECK(W.dtype() == torch::kUInt8);
     TORCH_CHECK(dY.dtype() == torch::kFloat32);
@@ -285,6 +302,8 @@ torch::Tensor bgemm_custom_grad_uint8_dw(
     // No need for zeros — no atomicAdd, each block writes exactly one element
     auto grad_W = torch::empty({O, CKK}, torch::dtype(torch::kFloat32).device(W.device()));
 
+    if (grad_W.numel() == 0) return grad_W;
+
     dim3 block(DW_BLOCK_SIZE);  // 256
     dim3 grid(O, CKK);          // one block per (o, ckk)
 
@@ -297,6 +316,7 @@ torch::Tensor bgemm_custom_grad_uint8_dw(
         N, CKK, O, L
     );
 
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return grad_W;
 }
 
@@ -500,7 +520,8 @@ torch::Tensor bgemm_custom_grad_int8_dx(
     torch::Tensor dY,      // (N, O, L) float32
     torch::Tensor dx_lut   // (65536,) float32
 ) {
-    TORCH_CHECK(X.is_cuda() && W.is_cuda() && dY.is_cuda());
+    check_backward_devices(X, W, dY, dx_lut);
+    const at::cuda::OptionalCUDAGuard device_guard(device_of(X));
     TORCH_CHECK(X.dtype() == torch::kInt8);
     TORCH_CHECK(W.dtype() == torch::kInt8);
     TORCH_CHECK(dY.dtype() == torch::kFloat32);
@@ -522,6 +543,8 @@ torch::Tensor bgemm_custom_grad_int8_dx(
 
     auto grad_X = torch::empty({N, CKK, L}, torch::dtype(torch::kFloat32).device(X.device()));
 
+    if (grad_X.numel() == 0) return grad_X;
+
     dim3 block(DX_TILE_L_I8, DX_TILE_CKK_I8);  // (64, 4) = 256 threads
     dim3 grid(
         (L   + DX_TILE_L_I8   - 1) / DX_TILE_L_I8,
@@ -538,6 +561,7 @@ torch::Tensor bgemm_custom_grad_int8_dx(
         N, CKK, O, L
     );
 
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return grad_X;
 }
 
@@ -547,7 +571,8 @@ torch::Tensor bgemm_custom_grad_int8_dw(
     torch::Tensor dY,      // (N, O, L) float32
     torch::Tensor dw_lut   // (65536,) float32
 ) {
-    TORCH_CHECK(X.is_cuda() && W.is_cuda() && dY.is_cuda());
+    check_backward_devices(X, W, dY, dw_lut);
+    const at::cuda::OptionalCUDAGuard device_guard(device_of(X));
     TORCH_CHECK(X.dtype() == torch::kInt8);
     TORCH_CHECK(W.dtype() == torch::kInt8);
     TORCH_CHECK(dY.dtype() == torch::kFloat32);
@@ -569,6 +594,8 @@ torch::Tensor bgemm_custom_grad_int8_dw(
 
     auto grad_W = torch::empty({O, CKK}, torch::dtype(torch::kFloat32).device(W.device()));
 
+    if (grad_W.numel() == 0) return grad_W;
+
     dim3 block(DW_BLOCK_SIZE_I8);  // 256
     dim3 grid(O, CKK);
 
@@ -581,6 +608,7 @@ torch::Tensor bgemm_custom_grad_int8_dw(
         N, CKK, O, L
     );
 
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return grad_W;
 }
 // ============================================================================

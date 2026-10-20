@@ -245,7 +245,7 @@ def check_dwconv_op(B, C, H, W, k, s, p, d, int_lut=True):
     if int_lut:
         lut = torch.randint(-127*127, 127*127, (256, 256), device=dev).float()
     else:
-        lut = torch.randn(256, 256, device=dev)  # non-integer -> fp32 LUT path
+        lut = torch.randint(-100000, 100000, (256, 256), device=dev).float()  # int32 LUT path
     x8 = torch.randint(-127, 128, (B, C, H, W), device=dev, dtype=torch.int8)
     w = torch.randint(-127, 128, (C, k * k), device=dev).float()
     y, wq = at.backend.ops.dwconv_fake_int8_claude(
@@ -259,7 +259,7 @@ def check_dwconv_op(B, C, H, W, k, s, p, d, int_lut=True):
     if not ok:
         nfail += 1
     print(f'{"PASS" if ok else "FAIL"} dwconv op B{B} C{C} {H}x{W} k{k} s{s} p{p} d{d}'
-          f' {"i16lut" if int_lut else "f32lut"}')
+          f' {"i16lut" if int_lut else "i32lut"}')
 
 
 # fp64 truth for depthwise module grads (grouped einsums)
@@ -359,7 +359,7 @@ check_dwconv_op(2, 16, 16, 16, 3, 2, 1, 1)
 check_dwconv_op(1, 4, 12, 12, 5, 1, 2, 1)        # generic-k template path
 check_dwconv_op(2, 8, 13, 11, 3, 1, 2, 2)        # dilated
 check_dwconv_op(2, 8, 9, 9, 3, 1, 0, 1)          # no pad
-check_dwconv_op(2, 8, 16, 16, 3, 1, 1, 1, int_lut=False)  # fp32-LUT path
+check_dwconv_op(2, 8, 16, 16, 3, 1, 1, 1, int_lut=False)  # int32-LUT path
 check_dwconv_op(1, 960, 7, 7, 3, 1, 1, 1)        # mobilenet last dw shape
 
 print('--- depthwise module (lre + ste) ---')

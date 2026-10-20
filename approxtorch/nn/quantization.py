@@ -39,9 +39,11 @@ class _static_quantize_per_tensor_symmetric(Function):
     @staticmethod
     def forward(ctx, x, scale, qmin, qmax):
         if _fusable(x, scale):
+            # 后续 forward 的 EMA 会原地更新 scale；前后向共用本次的独立快照。
+            s = scale.detach().clone()
             q, mask = torch.ops.approxtorch.fakequant_per_tensor_claude.default(
-                x, scale, qmin, qmax)
-            ctx.save_for_backward(mask, scale)  # 融合 backward 内部会 clamp scale
+                x, s, qmin, qmax)
+            ctx.save_for_backward(mask, s)  # 融合 backward 内部会 clamp scale
             ctx.fused = True
             return q
         ctx.fused = False
@@ -67,9 +69,11 @@ class _static_quantize_per_tensor_asymmetric(Function):
     @staticmethod
     def forward(ctx, x, scale, zero_point, qmin, qmax):
         if _fusable(x, scale, zero_point):
+            # 与对称量化一样，保存本次 scale，避免后续 EMA 修改待反传的值。
+            s = scale.detach().clone()
             q, mask = torch.ops.approxtorch.fakequant_per_tensor_asymmetric_claude.default(
-                x, scale, zero_point, qmin, qmax)
-            ctx.save_for_backward(mask, scale)
+                x, s, zero_point, qmin, qmax)
+            ctx.save_for_backward(mask, s)
             ctx.fused = True
             return q
         ctx.fused = False

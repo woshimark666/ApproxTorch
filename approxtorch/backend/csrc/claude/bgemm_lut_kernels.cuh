@@ -5,7 +5,7 @@
 // in the prepass offsets and the LUT layout chosen by the caller.
 //
 // Contents: u8 quantize prepass, 16-bit LUT imaging (int16 / uint16 dual
-// interpretation + fp32 fallback), the tiled main kernel with its three
+// interpretation + int32 fallback), the tiled main kernel with its three
 // row/col addressing modes, split-K launch + reduction, the tuned tile-config
 // dispatch table and shape heuristics. Design rationale and measured numbers
 // live in NOTES.md; the main kernel's contract is documented at
@@ -23,16 +23,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 
-#ifndef CHECK_CUDA_ERROR
-#define CHECK_CUDA_ERROR()                                      \
-    do {                                                        \
-        cudaError_t err = cudaGetLastError();                   \
-        if (err != cudaSuccess) {                               \
-            printf("CUDA kernel failed: %s\n",                  \
-                   cudaGetErrorString(err));                    \
-        }                                                       \
-    } while (0)
-#endif
+#include "../cuda/integer_lut.cuh"
 
 namespace claude_bgemm {
 
@@ -96,57 +87,12 @@ __global__ void quantize_to_u8_kernel(
     }
 }
 
-// LUT preprocessing (one kernel pass over 65536 entries, ~microseconds).
-//
-// 16-bit image: a float LUT is 256KB (twice the 128KB L1 of sm_89);
-// approximate-multiplier tables are integer-valued and fit 16 bits, in which
-// case the whole table is 128KB, gathers pull half the sectors, and most of
-// it stays L1-resident. Two interpretations share one image: signed int16
-// (8x8 signed tables, values in [-32767, 32767]) and uint16 (uint8 x uint8
-// tables, values in [0, 65535] — up to 255*255 = 65025, beyond int16). The
-// stored low 16 bits of the integer value are the correct bit pattern under
-// EITHER interpretation; `bad` is int[2] (zero-initialized), bad[0] set if
-// some entry is not exact int16, bad[1] if not exact uint16. The main kernel
-// reads both as grid-uniform flags (no host sync) and picks int16 -> uint16
-// -> float32; the 16-bit -> float conversion is exact either way, so results
-// stay bit-identical. Mixed-sign tables exceeding int16 fall back to float.
-//
-// TRANSPOSE=true additionally produces the transposed float/16-bit images
-// SFLAT mode needs, fused into the same launch.
-template<bool TRANSPOSE>
-__global__ void prepare_lut_kernel(
-    const float* __restrict__ in,
-    float* __restrict__ outf,    // transposed float image (TRANSPOSE only)
-    short* __restrict__ out16,
-    int* __restrict__ bad)       // int[2]: [0] int16 invalid, [1] uint16 invalid
-{
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;   // grid covers 65536
-    const float v = in[i];
-    const float r = rintf(v);
-    const bool is_int = (v == r);
-    const bool i16_ok = is_int && (fabsf(v) <= 32767.0f);
-    const bool u16_ok = is_int && (v >= 0.0f) && (v <= 65535.0f);
-    if (!i16_ok) bad[0] = 1;
-    if (!u16_ok) bad[1] = 1;
-    // low 16 bits of the integer value: valid pattern for both interpretations
-    const short v16 = (i16_ok || u16_ok)
-        ? static_cast<short>(static_cast<unsigned short>(static_cast<int>(r)))
-        : 0;
-    if constexpr (TRANSPOSE) {
-        const int o = ((i & 255) << 8) | (i >> 8);   // [x][w] -> [w][x]
-        outf[o]  = v;
-        out16[o] = v16;
-    } else {
-        out16[i] = v16;
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Split-K reduction: y[i] = sum_s ws[s * numel + i], ascending s.
 // ---------------------------------------------------------------------------
 
 static __global__ void reduce_splits_kernel(
-    const float* __restrict__ ws,
+    const int32_t* __restrict__ ws,
     float* __restrict__ y,
     long long numel,
     int S)
@@ -154,11 +100,11 @@ static __global__ void reduce_splits_kernel(
     const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
     for (long long i = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
          i < numel; i += stride) {
-        float a = 0.0f;
+        int32_t a = 0;
         for (int s = 0; s < S; ++s) {
-            a += ws[static_cast<long long>(s) * numel + i];
+            a = approxtorch_integer::add(a, ws[static_cast<long long>(s) * numel + i]);
         }
-        y[i] = a;
+        y[i] = static_cast<float>(a);
     }
 }
 
@@ -187,7 +133,7 @@ __device__ __forceinline__ void bgemm_mainloop(
     const LUT_T*  __restrict__ lut,
     uint8_t (&srow)[BK][BM],
     uint8_t (&scol)[BK][BN],
-    float (&acc)[TM][TN],
+    int32_t (&acc)[TM][TN],
     int K, int R, int C, int L,
     int kbeg, int kend,
     int r0, int c0, int tx, int ty, int tid)
@@ -278,7 +224,8 @@ __device__ __forceinline__ void bgemm_mainloop(
                     const unsigned row = static_cast<unsigned>(xb[tm]) << 8;
 #pragma unroll
                     for (int tn = 0; tn < TN; ++tn) {
-                        acc[tm][tn] += static_cast<float>(__ldg(lut + (row | wb[tn])));
+                        acc[tm][tn] = approxtorch_integer::add(
+                            acc[tm][tn], static_cast<int32_t>(__ldg(lut + (row | wb[tn]))));
                     }
                 }
             }
@@ -296,7 +243,8 @@ __device__ __forceinline__ void bgemm_mainloop(
                     const unsigned row = static_cast<unsigned>(xb[tm]) << 8;
 #pragma unroll
                     for (int tn = 0; tn < TN; ++tn) {
-                        acc[tm][tn] += static_cast<float>(__ldg(lut + (row | wb[tn])));
+                        acc[tm][tn] = approxtorch_integer::add(
+                            acc[tm][tn], static_cast<int32_t>(__ldg(lut + (row | wb[tn]))));
                     }
                 }
             }
@@ -305,15 +253,15 @@ __device__ __forceinline__ void bgemm_mainloop(
     }
 }
 
-template<int BM, int BN, int BK, int TM, int TN, int MODE>
+template<int BM, int BN, int BK, int TM, int TN, int MODE, typename OUT_T>
 __global__ void __launch_bounds__(256)
 bgemm_lut_u8_kernel(
     const uint8_t* __restrict__ rowsrc,
     const uint8_t* __restrict__ colsrc,
-    const float* __restrict__ lut,
+    const int32_t* __restrict__ lut,
     const short* __restrict__ lut16,
     const int*   __restrict__ lut16_bad,
-    float* __restrict__ out,
+    OUT_T* __restrict__ out,
     int K, int R, int C, int L, int O,
     int kt_split)
 {
@@ -334,15 +282,15 @@ bgemm_lut_u8_kernel(
 
     out += static_cast<long long>(s) * R * C;
 
-    float acc[TM][TN];
+    int32_t acc[TM][TN];
 #pragma unroll
     for (int i = 0; i < TM; ++i)
 #pragma unroll
         for (int j = 0; j < TN; ++j)
-            acc[i][j] = 0.0f;
+            acc[i][j] = 0;
 
     // grid-uniform branch (flags identical for every block -> sync-safe):
-    // int16 image -> uint16 image (same bits, unsigned read) -> float LUT
+    // int16 image -> uint16 image (same bits, unsigned read) -> int32 LUT
     if (__ldg(lut16_bad + 0) == 0) {
         bgemm_mainloop<BM, BN, BK, TM, TN, MODE>(
             rowsrc, colsrc, lut16, srow, scol, acc,
@@ -379,7 +327,7 @@ bgemm_lut_u8_kernel(
                         const int l = c - n * L;
                         off = (static_cast<long long>(n) * O + r) * L + l;
                     }
-                    out[off] = acc[tm][tn];
+                    out[off] = static_cast<OUT_T>(acc[tm][tn]);
                 }
             }
         }
@@ -393,7 +341,7 @@ bgemm_lut_u8_kernel(
 struct LaunchArgs {
     const uint8_t* rowsrc;
     const uint8_t* colsrc;
-    const float* lut;
+    const int32_t* lut;
     const short* lut16;
     const int* lut16_bad;
     float* y;
@@ -405,6 +353,7 @@ struct LaunchArgs {
 template<int BM, int BN, int BK, int TM, int TN, int MODE>
 void launch_cfg(const LaunchArgs& a)
 {
+    if (a.R == 0 || a.C == 0) return;
     dim3 block(BN / TN, BM / TM);
     const int gx = ceil_div(a.C, BN);
     const int gy = ceil_div(a.R, BM);
@@ -429,17 +378,20 @@ void launch_cfg(const LaunchArgs& a)
         bgemm_lut_u8_kernel<BM, BN, BK, TM, TN, MODE><<<grid, block, 0, a.stream>>>(
             a.rowsrc, a.colsrc, a.lut, a.lut16, a.lut16_bad,
             a.y, a.K, a.R, a.C, a.L, a.O, kt_split);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
     } else {
         const long long numel = static_cast<long long>(a.R) * a.C;
-        auto ws = torch::empty({S * numel}, a.f32opts);
+        auto ws = torch::empty({S * numel}, a.f32opts.dtype(torch::kInt32));
         bgemm_lut_u8_kernel<BM, BN, BK, TM, TN, MODE><<<grid, block, 0, a.stream>>>(
             a.rowsrc, a.colsrc, a.lut, a.lut16, a.lut16_bad,
-            ws.data_ptr<float>(), a.K, a.R, a.C, a.L, a.O, kt_split);
+            ws.data_ptr<int32_t>(), a.K, a.R, a.C, a.L, a.O, kt_split);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
         const int threads = 256;
         const int blocks = static_cast<int>(
             std::min<long long>((numel + threads - 1) / threads, 4096));
         reduce_splits_kernel<<<blocks, threads, 0, a.stream>>>(
-            ws.data_ptr<float>(), a.y, numel, S);
+            ws.data_ptr<int32_t>(), a.y, numel, S);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
     }
 }
 

@@ -14,7 +14,7 @@
 #  D. adversarial padding: dw[128] = 1e4 (any padding-semantics slip blows
 #     far past the tolerance)
 #  E. randomized fuzz over geometry x {groups=1, depthwise} x {ste, lre}
-#  F. int16-LUT edge values, fp32-LUT fallback, non-contiguous inputs
+#  F. int16-LUT edge values, int32-LUT fallback, non-contiguous inputs
 #  G. end-to-end learning: swapped MobileNetV2 overfits one batch
 import torch
 import torch.nn as nn
@@ -275,7 +275,7 @@ w = torch.randint(-127, 128, (8, 9), device=dev).float()
 lut_edge = torch.full((256, 256), 32767.0, device=dev)
 lut_edge[::2] = -32767.0                      # int16 boundary values
 y1, _ = at.backend.ops.dwconv_fake_int8_claude(x8, w, lut_edge, 3, 1, 1, 1)
-lut_bad = lut_edge.clone(); lut_bad[0, 0] = 32768.0   # forces fp32 path
+lut_bad = lut_edge.clone(); lut_bad[0, 0] = 32768.0   # forces int32 path
 y2, _ = at.backend.ops.dwconv_fake_int8_claude(x8, w, lut_bad, 3, 1, 1, 1)
 lutf = lut_edge.reshape(-1)
 xu = F.unfold(x8.float(), (3, 3), padding=1).view(2, 8, 9, -1)
@@ -287,7 +287,7 @@ lutb = lut_bad.reshape(-1)
 acc2 = torch.zeros_like(acc)
 for t in range(9):
     acc2 = acc2 + lutb[(xu[:, :, t] + 128).long() * 256 + (w[:, t] + 128).long().view(1, 8, 1)]
-report(torch.equal(y2.flatten(2), acc2), 'F fp32-fallback LUT bitwise')
+report(torch.equal(y2.flatten(2), acc2), 'F int32-fallback LUT bitwise')
 
 lut = torch.randint(-127*127, 127*127, (256, 256), device=dev).float()
 for g, Cc in ((1, 16), (16, 16)):

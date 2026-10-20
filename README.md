@@ -65,6 +65,20 @@ Describe your approximate multiplier as a plain-text file containing a **256×25
                      ...  16129 # A =  127
 ```
 
+The CUDA integer forward paths (GEMM, BGEMM and depthwise convolution)
+accumulate LUT results in **INT32**, including split-K partial sums and their
+reduction, then convert the final sum once to **FP32** before dequantization.
+The LUT API still takes FP32 tensors, but each stored value must be a finite
+integer in `[-2147483648, 2147483647]`; fractional or out-of-range entries raise
+`RuntimeError`. This validation synchronizes the current CUDA stream on each
+call, so these forward ops cannot be captured in a CUDA graph. Large integers
+not exactly representable in FP32 are already rounded when the LUT is created.
+Addition wraps in two's-complement INT32 on overflow; keep sums within INT32
+range when an unwrapped mathematical sum is required. Final FP32 conversion
+can round integers beyond `2**24`. Gradient LUTs and backward arithmetic remain
+FP32 and accept fractional values. All tensors passed to an op must share a
+CUDA device; the op uses that device's current stream.
+
 An exact-multiplier example is provided at `test/exact_int8.txt`; LUTs of several published approximate multipliers are in `test/` as well (e.g. `mul8u_syn1.txt`, `venka.txt`, `zhang.txt`).
 
 ### 2. Convert your model and train

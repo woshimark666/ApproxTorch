@@ -6,7 +6,7 @@
 // Out-of-bounds x positions reproduce the im2col pipeline's zero padding:
 // quantized zero == LUT row index 128 (lut[128][w] is generally nonzero for
 // an approximate multiplier), NOT a zero contribution. Accumulation walks
-// the taps in (i, j) row-major ascending order with plain float adds — the
+// the taps in (i, j) row-major ascending order with INT32 adds and a final FP32 cast — the
 // same order a per-group im2col GEMM would use — so y is bit-identical to
 // running the main LUT-BGEMM per channel.
 //
@@ -16,8 +16,8 @@
 // (different x index), so gathers from the TRANSPOSED table lutT[w][x] stay
 // inside one 1KB row (512B for the int16 image): the per-channel hot set is
 // just kh*kw rows and lives in L1. The int16 image is used when the table
-// is integer-valued (validated on device, grid-uniform flag, no host sync —
-// same scheme as the main bgemm).
+// fits int16; otherwise uint16 or int32 is used. LUT validation synchronizes
+// the stream to reject invalid values with a recoverable host exception.
 //
 // Registered op:
 //   dwconv_fake_int8_claude(x [N,C,H,W] f32|i8|u8, w [C, kh*kw] f32
@@ -33,6 +33,7 @@
 #include <cuda_runtime.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
+#include "../cuda/integer_lut.cuh"
 
 namespace claude_dwconv {
 
@@ -54,22 +55,6 @@ __global__ void quantize_w_kernel(const float* __restrict__ w,
         const int q = __float2int_rn(w[i]) + 128;
         wq[i] = (uint8_t)max(0, min(255, q));
     }
-}
-
-// Transposed LUT images ([x][w] -> [w][x]) + int16 validity flag. Same pass
-// as bgemm_float_claude.cu's prepare_lut_kernel<true>; grid covers 65536.
-__global__ void prepare_lutT_kernel(const float* __restrict__ in,
-                                    float* __restrict__ outf,
-                                    short* __restrict__ out16,
-                                    int* __restrict__ bad) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    const float v = in[i];
-    const float r = rintf(v);
-    const bool good = (v == r) && (fabsf(v) <= 32767.0f);
-    if (!good) *bad = 1;
-    const int o = ((i & 255) << 8) | (i >> 8);
-    outf[o]  = v;
-    out16[o] = good ? (short)r : 0;
 }
 
 // TKH/TKW > 0: compile-time kernel size (3x3 hot case: tap loop fully
@@ -101,7 +86,7 @@ __device__ __forceinline__ void dw_mainloop(
             const T* xn = x + ((long long)n * C + c) * H * W;
             const int ih0 = oh * SH - PH;
             const int iw0 = ow * SW - PW;
-            float acc = 0.0f;
+            int32_t acc = 0;
 #pragma unroll
             for (int i = 0; i < TKH; ++i) {
                 const int ih = ih0 + i * DH;
@@ -114,10 +99,10 @@ __device__ __forceinline__ void dw_mainloop(
                     if (rowok && (unsigned)iw < (unsigned)W) {
                         xi = lut_idx_of(xrow[iw]);
                     }
-                    acc += (float)__ldg(lutT + wrow[i * TKW + j] + xi);
+                    acc = approxtorch_integer::add(acc, static_cast<int32_t>(__ldg(lutT + wrow[i * TKW + j] + xi)));
                 }
             }
-            y[((long long)n * C + c) * L + l] = acc;
+            y[((long long)n * C + c) * L + l] = static_cast<float>(acc);
         }
     } else {
         const uint8_t* wc = wq + (long long)c * KH * KW;
@@ -130,7 +115,7 @@ __device__ __forceinline__ void dw_mainloop(
             const T* xn = x + ((long long)n * C + c) * H * W;
             const int ih0 = oh * SH - PH;
             const int iw0 = ow * SW - PW;
-            float acc = 0.0f;
+            int32_t acc = 0;
             for (int i = 0; i < KH; ++i) {
                 const int ih = ih0 + i * DH;
                 const bool rowok = (unsigned)ih < (unsigned)H;
@@ -142,10 +127,10 @@ __device__ __forceinline__ void dw_mainloop(
                         xi = lut_idx_of(xrow[iw]);
                     }
                     const int wr = (int)__ldg(wc + i * KW + j) << 8;
-                    acc += (float)__ldg(lutT + wr + xi);
+                    acc = approxtorch_integer::add(acc, static_cast<int32_t>(__ldg(lutT + wr + xi)));
                 }
             }
-            y[((long long)n * C + c) * L + l] = acc;
+            y[((long long)n * C + c) * L + l] = static_cast<float>(acc);
         }
     }
 }
@@ -154,7 +139,7 @@ template <typename T, int TKH, int TKW>
 __global__ void __launch_bounds__(THREADS)
 dwconv_lut_kernel(
     const T* __restrict__ x, const uint8_t* __restrict__ wq,
-    const float* __restrict__ lutTf, const short* __restrict__ lutT16,
+    const int32_t* __restrict__ lutTf, const short* __restrict__ lutT16,
     const int* __restrict__ lutT16_bad,
     float* __restrict__ y,
     int N, int C, int H, int W,
@@ -166,8 +151,12 @@ dwconv_lut_kernel(
     if (__ldg(lutT16_bad) == 0) {
         dw_mainloop<T, short, TKH, TKW>(x, wq, lutT16, y, N, C, H, W, c,
             KH, KW, SH, SW, PH, PW, DH, DW, OH, OW);
+    } else if (__ldg(lutT16_bad + 1) == 0) {
+        dw_mainloop<T, unsigned short, TKH, TKW>(x, wq,
+            reinterpret_cast<const unsigned short*>(lutT16), y, N, C, H, W, c,
+            KH, KW, SH, SW, PH, PW, DH, DW, OH, OW);
     } else {
-        dw_mainloop<T, float, TKH, TKW>(x, wq, lutTf, y, N, C, H, W, c,
+        dw_mainloop<T, int32_t, TKH, TKW>(x, wq, lutTf, y, N, C, H, W, c,
             KH, KW, SH, SW, PH, PW, DH, DW, OH, OW);
     }
 }
@@ -180,6 +169,8 @@ std::tuple<torch::Tensor, torch::Tensor> dwconv_impl(
 {
     TORCH_CHECK(x_in.is_cuda() && w_in.is_cuda() && lut_in.is_cuda(),
                 "all tensors must be CUDA");
+    TORCH_CHECK(x_in.device() == w_in.device() && x_in.device() == lut_in.device(),
+                "x, w and lut must be on the same CUDA device");
     TORCH_CHECK(x_in.scalar_type() == torch::kFloat32
                 || x_in.scalar_type() == torch::kChar
                 || x_in.scalar_type() == torch::kByte,
@@ -219,22 +210,15 @@ std::tuple<torch::Tensor, torch::Tensor> dwconv_impl(
 
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-    {
+    if (C * kk > 0) {
         const int n = (int)(C * kk);
         quantize_w_kernel<<<(n + THREADS - 1) / THREADS, THREADS, 0, stream>>>(
             w.data_ptr<float>(), wq.data_ptr<uint8_t>(), n);
         C10_CUDA_KERNEL_LAUNCH_CHECK();
     }
 
+    auto prepared = approxtorch_integer::prepare(lut, true, stream);
     if (y.numel() == 0) return std::make_tuple(y, wq);
-
-    auto lutT = torch::empty({256 * 256}, fopts);
-    auto lutT16 = torch::empty({256 * 256}, x.options().dtype(torch::kInt16));
-    auto lutT16_bad = torch::zeros({1}, x.options().dtype(torch::kInt32));
-    prepare_lutT_kernel<<<256, 256, 0, stream>>>(
-        lut.data_ptr<float>(), lutT.data_ptr<float>(),
-        lutT16.data_ptr<short>(), lutT16_bad.data_ptr<int>());
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
 
     // gathers hit L1 (kh*kw hot LUT rows per channel), so the launch only
     // needs enough blocks to fill the GPU: cap the total and grid-stride
@@ -248,8 +232,8 @@ std::tuple<torch::Tensor, torch::Tensor> dwconv_impl(
         auto args = [&](auto kern) {
             kern<<<grid, THREADS, 0, stream>>>(
                 xp, wq.data_ptr<uint8_t>(),
-                lutT.data_ptr<float>(), lutT16.data_ptr<short>(),
-                lutT16_bad.data_ptr<int>(), y.data_ptr<float>(),
+                prepared.values.data_ptr<int32_t>(), prepared.values16.data_ptr<short>(),
+                prepared.bad.data_ptr<int>(), y.data_ptr<float>(),
                 (int)N, (int)C, (int)H, (int)W,
                 (int)kh, (int)kw, (int)sh, (int)sw,
                 (int)ph, (int)pw, (int)dilh, (int)dilw, (int)OH, (int)OW);

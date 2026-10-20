@@ -1,5 +1,13 @@
 # claude/bgemm_float_claude.cu — optimization log
 
+Current integer-forward contract: LUT entries are validated as finite INT32-range
+integers (FP32 API storage), with a host synchronization to raise recoverable
+errors. Accumulation, split-K workspace and reduction now use INT32, then one
+FP32 cast at output. Addition wraps modulo 2^32. LUT images use int16, uint16 or
+int32; fractional forward LUTs are rejected. Backward remains FP32. The timings
+and FP32-accumulation/fallback descriptions below are historical measurements
+from before this change and need rebenchmarking for the current implementation.
+
 Target: LUT-based approximate-multiplication BGEMM
 (`bgemm_fake_int8_forward_cuda` in `../cuda/bgemm_float_gpt.cu`).
 Machine: 2x RTX 6000 Ada (sm_89, 142 SMs, 128KB unified L1/SM, ~96MB L2),

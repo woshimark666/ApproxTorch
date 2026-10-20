@@ -7,7 +7,7 @@
 #
 # All comparisons are EXACT (torch.equal / max-abs == 0): LUT values and K are
 # chosen so every fp32 partial sum is exactly representable (integer sums
-# < 2^24, or 0.5-grid sums < 2^23), so any accumulation order — including
+# < 2^24), so any accumulation order — including
 # split-K — must reproduce the double-precision oracle bit-for-bit.
 #
 #  A. independent oracle: chunked double-precision gather-sum over LUT indices,
@@ -19,7 +19,7 @@
 #     odd-sized shape, plus the forced-NFLAT -> SFLAT grid.y-overflow fallback
 #  D. input-path variants: uint8-dtype x (prepass skipped, xq aliases input)
 #     vs fp32 x, non-contiguous x / w, fp32 clamp of out-of-range values
-#  E. LUT images: non-integer LUT (fp32 fallback), mixed-range LUT (fp32
+#  E. LUT images: non-integer LUT rejection, mixed-range LUT (int32
 #     fallback), uint16-range LUT (u16 image path, incl. forced NFLAT/SFLAT),
 #     exact-product LUT lut[a][b] = a*b vs a plain einsum
 #  F. _save returns: wq == raw u8 w values, xq == raw u8 x values / alias
@@ -151,21 +151,24 @@ y = op_u8_cfg(x_u, w_u, int_lut, 0)   # cfg 0 forces NFLAT; must fall back
 report(torch.equal(y.double(), ref), 'grid.y-overflow NFLAT->SFLAT fallback')
 
 # ------------------------------------------------------------------------ E
-# non-integer LUT -> fp32-LUT fallback (0.5 grid keeps fp32 sums exact)
+# Non-integer forward LUTs must be rejected before the main kernel.
 x_u, w_u = make_inputs(2, 64, 33, 21)
 half_lut = torch.randint(-128, 128, (65536,), device=dev).float() * 0.5
-y = op_u8(x_u, w_u, half_lut)
-ref = ref_bgemm(x_u.long(), w_u.long(), half_lut)
-report(torch.equal(y.double(), ref), 'non-integer LUT (fp32 fallback)')
+try:
+    op_u8(x_u, w_u, half_lut)
+except RuntimeError as exc:
+    report('finite integer values' in str(exc), 'non-integer LUT rejected')
+else:
+    report(False, 'non-integer LUT rejected')
 
-# integer LUT beyond int16 range -> fp32-LUT fallback (K small: sums exact)
+# integer LUT beyond int16 range -> int32-LUT fallback (K small: sums exact)
 big_lut = torch.randint(-64, 64, (65536,), device=dev).float()
 big_lut[123 * 256 + 45] = 40000.0
 big_lut[7 * 256 + 200] = -40000.0
 x_u, w_u = make_inputs(2, 8, 17, 13)
 y = op_u8(x_u, w_u, big_lut)
 ref = ref_bgemm(x_u.long(), w_u.long(), big_lut)
-report(torch.equal(y.double(), ref), 'LUT beyond int16 (fp32 fallback)')
+report(torch.equal(y.double(), ref), 'LUT beyond int16 (int32 fallback)')
 
 # uint16-range integer LUT (real uint8 x uint8 product tables land here:
 # values up to 65025 exceed int16 but fit the L1-resident uint16 image)
@@ -187,7 +190,7 @@ mix_lut = u16_lut.clone()
 mix_lut[300] = -3.0
 ref = ref_bgemm(x_u.long(), w_u.long(), mix_lut)
 report(torch.equal(op_u8(x_u, w_u, mix_lut).double(), ref),
-       'mixed-range LUT (fp32 fallback)')
+       'mixed-range LUT (int32 fallback)')
 
 # exact-product LUT lut[a][b] = a * b: op == plain einsum
 # (values reach 255*255 = 65025: uint16 image path, the real-table case)

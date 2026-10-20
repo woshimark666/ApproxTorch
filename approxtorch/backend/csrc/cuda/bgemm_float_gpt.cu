@@ -5,16 +5,7 @@
 #include <c10/cuda/CUDAGuard.h>
 
 
-#ifndef CHECK_CUDA_ERROR
-#define CHECK_CUDA_ERROR()                                      \
-    do {                                                        \
-        cudaError_t err = cudaGetLastError();                   \
-        if (err != cudaSuccess) {                               \
-            printf("CUDA kernel failed: %s\n",                  \
-                   cudaGetErrorString(err));                    \
-        }                                                       \
-    } while (0)
-#endif
+#include "integer_lut.cuh"
 
 // tile 参数
 // BM: 一次算多少个 M = N * L 的 row
@@ -25,7 +16,7 @@ template<int BM, int BN, int BK>
 __global__ void bgemm_lut_fake_int8_forward_kernel(
     const float* __restrict__ x,       // [N, K, L]
     const float* __restrict__ wt,      // [K, O], w 的转置
-    const float* __restrict__ lut,     // [65536]
+    const int32_t* __restrict__ lut,     // [65536]
     float* __restrict__ y,             // [N, O, L]
     int N,
     int K,
@@ -48,7 +39,7 @@ __global__ void bgemm_lut_fake_int8_forward_kernel(
     __shared__ unsigned short sx[BM][BK + 1];
     __shared__ unsigned short sw[BK][BN + 1];
 
-    float acc = 0.0f;
+    int32_t acc = 0;
 
     const int tid = ty * BN + tx;
     constexpr int NUM_THREADS = BM * BN;
@@ -117,7 +108,7 @@ __global__ void bgemm_lut_fake_int8_forward_kernel(
                     // LUT[(x + 128) * 256 + (w + 128)]
                     const int lut_idx = (xi << 8) | wi;
 
-                    acc += __ldg(lut + lut_idx);
+                    acc = approxtorch_integer::add(acc, __ldg(lut + lut_idx));
                 }
             }
         }
@@ -127,7 +118,7 @@ __global__ void bgemm_lut_fake_int8_forward_kernel(
 
     if (n < N && l < L && col < O) {
         // y shape: [N, O, L]
-        y[(n * O + col) * L + l] = acc;
+        y[(n * O + col) * L + l] = static_cast<float>(acc);
     }
 }
 
@@ -141,6 +132,8 @@ torch::Tensor bgemm_lut_forward_cuda(
     TORCH_CHECK(x.is_cuda(), "x must be a CUDA tensor");
     TORCH_CHECK(w.is_cuda(), "w must be a CUDA tensor");
     TORCH_CHECK(lut.is_cuda(), "lut must be a CUDA tensor");
+    TORCH_CHECK(x.device() == w.device() && x.device() == lut.device(),
+                "x, w and lut must be on the same CUDA device");
 
     TORCH_CHECK(x.scalar_type() == torch::kFloat32, "x must be float32");
     TORCH_CHECK(w.scalar_type() == torch::kFloat32, "w must be float32");
@@ -159,6 +152,9 @@ torch::Tensor bgemm_lut_forward_cuda(
     const int O = static_cast<int>(w.size(0));
 
     auto y = torch::empty({N, O, L}, x.options());
+    auto prepared = approxtorch_integer::prepare(lut, false, at::cuda::getCurrentCUDAStream());
+    if (y.numel() == 0) return y;
+    auto xc = x.contiguous();
 
     // 为了让 w 读取 coalesced，把 [O, K] 转成 [K, O]
     // 如果 w 在多次调用中不变，可以在外面提前转置，进一步减少开销
@@ -183,9 +179,9 @@ torch::Tensor bgemm_lut_forward_cuda(
 
     bgemm_lut_fake_int8_forward_kernel<BM, BN, BK>
     <<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
-        x.data_ptr<float>(),
+        xc.data_ptr<float>(),
         wt.data_ptr<float>(),
-        lut.data_ptr<float>(),
+        prepared.values.data_ptr<int32_t>(),
         y.data_ptr<float>(),
         N,
         K,
@@ -193,7 +189,7 @@ torch::Tensor bgemm_lut_forward_cuda(
         O
     );
 
-    CHECK_CUDA_ERROR();
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 
     return y;
 }

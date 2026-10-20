@@ -39,17 +39,10 @@
 //  5. Split-K when the natural grid is too small to fill the GPU: partial
 //     sums go to a workspace and a deterministic reduction produces y.
 //
-// Without split-K the accumulation order over k matches the reference
-// (ascending k, plain float adds), so results are bit-identical to it. With
-// split-K the association changes (chunk partials are reduced in ascending
-// chunk order); results stay deterministic and are exact whenever the LUT
-// holds integers and intermediate sums stay below 2^24 (the common case for
-// 8x8 approximate-multiplier tables).
-//
-// The 16-bit L1-resident LUT image covers both signed tables (int16, values
-// in [-32767, 32767]) and unsigned uint8 x uint8 tables (uint16, values up
-// to 65535 >= 255*255); see prepare_lut_kernel. Only mixed-sign tables
-// exceeding int16 fall back to the 256KB float image.
+// All LUT entries must be finite integers representable as INT32. The main
+// accumulators, split-K workspace and reduction use INT32, with a single
+// conversion to FP32 at the final output. Integer addition wraps modulo 2^32.
+// The LUT uses an int16/uint16 image when possible, otherwise int32.
 
 #include "bgemm_lut_kernels.cuh"
 
@@ -80,6 +73,8 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bgemm_forward_sav
     TORCH_CHECK(x.is_cuda(), "x must be a CUDA tensor");
     TORCH_CHECK(w.is_cuda(), "w must be a CUDA tensor");
     TORCH_CHECK(lut.is_cuda(), "lut must be a CUDA tensor");
+    TORCH_CHECK(x.device() == w.device() && x.device() == lut.device(),
+                "x, w and lut must be on the same CUDA device");
     TORCH_CHECK(x.scalar_type() == torch::kFloat32
                 || x.scalar_type() == torch::kByte,
                 "x must be float32 or uint8 (LUT indices)");
@@ -152,19 +147,13 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bgemm_forward_sav
         c = (c >= 0) ? -1 : c;
     }
 
+    auto prepared = approxtorch_integer::prepare(lutc, mode == SFLAT, stream);
     LaunchArgs a{
-        nullptr, nullptr, lutc.data_ptr<float>(), nullptr, nullptr,
+        nullptr, nullptr, prepared.values.data_ptr<int32_t>(),
+        prepared.values16.data_ptr<short>(), prepared.bad.data_ptr<int>(),
         y.data_ptr<float>(),
         K, 0, 0, L, O, f32opts, stream.stream()
     };
-
-    // LUT images: 16-bit (+ transposed copies for SFLAT) and validity flags
-    // [0]: int16 interpretation invalid, [1]: uint16 interpretation invalid
-    auto lut16 = torch::empty({256 * 256}, u8opts.dtype(torch::kInt16));
-    auto lut16_bad = torch::zeros({2}, u8opts.dtype(torch::kInt32));
-    torch::Tensor lutT;   // keep alive until kernel runs
-    a.lut16 = lut16.data_ptr<short>();
-    a.lut16_bad = lut16_bad.data_ptr<int>();
 
     if (mode == XMK) {
         a.rowsrc = xq.data_ptr<uint8_t>();
@@ -179,20 +168,6 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bgemm_forward_sav
         a.colsrc = xq.data_ptr<uint8_t>();
         a.R = O; a.C = static_cast<int>(NL);
     }
-    if (mode == SFLAT) {
-        lutT = torch::empty_like(lutc);
-        prepare_lut_kernel<true><<<256, 256, 0, stream>>>(
-            lutc.data_ptr<float>(), lutT.data_ptr<float>(),
-            lut16.data_ptr<short>(), lut16_bad.data_ptr<int>());
-        a.lut = lutT.data_ptr<float>();
-    } else {
-        prepare_lut_kernel<false><<<256, 256, 0, stream>>>(
-            lutc.data_ptr<float>(), nullptr,
-            lut16.data_ptr<short>(), lut16_bad.data_ptr<int>());
-    }
-
-
-
     if (c < 0) c = (mode == NFLAT) ? pick_cfg_nflat(a.R, a.C)
                                    : pick_cfg_sflat(a.R, a.C);
 
@@ -200,7 +175,7 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bgemm_forward_sav
     else if (mode == NFLAT)  dispatch_cfg<NFLAT>(c, a);
     else                     dispatch_cfg<SFLAT>(c, a);
 
-    CHECK_CUDA_ERROR();
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return std::make_tuple(y, xq, wq);
 }
 

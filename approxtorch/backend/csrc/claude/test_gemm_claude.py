@@ -8,7 +8,7 @@
 # ops from the same u8-domain data (int8 gets values-128), so one fp64
 # gather-sum oracle checks both AND their bit-equivalence at once. All
 # comparisons are EXACT: LUT ranges and K keep fp32 partial sums below 2^24
-# (or on the 0.5 grid below 2^23), so any tiling / orientation / split-K
+# so any tiling / orientation / split-K
 # order must reproduce the oracle bit-for-bit.
 #
 #  A. oracle sweep over shapes hitting: both orientations (XMK warp-on-N /
@@ -20,8 +20,8 @@
 #  D. degenerate shapes: M=0 / N=0 return empty, K=0 returns exact zeros
 #  E. input paths: uint8-dtype A/B (prepass skipped / fused), non-contiguous
 #     A, B as a transposed weight view W.t() (the Linear case), fp32 clamp
-#  F. LUT images: int16, uint16 (u8 product table), fp32 fallbacks
-#     (non-integer / mixed-range), exact-product LUTs vs fp64 torch.mm
+#  F. LUT images: int16, uint16 (u8 product table), int32 mixed-range,
+#     non-integer rejection, exact-product LUTs vs fp64 torch.mm
 #  G. _save contract: aq [M,K], bq [N,K] is the TRANSPOSED image, u8 aliasing
 #  H. invalid inputs raise cleanly (no crash): shape mismatch, bad lut size,
 #     3-D A, CPU tensors
@@ -181,13 +181,17 @@ report(torch.equal(u8(au, bu, u16_lut).double(), ref), 'uint16-range LUT')
 report(torch.equal(u8_cfg(au, bu, u16_lut, 100).double(), ref),
        'uint16-range LUT, swapped (transposed u16 image)')
 
-# non-integer and mixed-range LUTs -> fp32 fallback
+# Non-integer LUT rejection and mixed-range INT32 LUT image.
 half_lut = torch.randint(-128, 128, (65536,), device=dev).float() * 0.5
-ref = ref_gemm(au.long(), bu.long(), half_lut)
-report(torch.equal(u8(au, bu, half_lut).double(), ref), 'non-integer LUT (fp32)')
+try:
+    u8(au, bu, half_lut)
+except RuntimeError as exc:
+    report('finite integer values' in str(exc), 'non-integer LUT rejected')
+else:
+    report(False, 'non-integer LUT rejected')
 mix_lut = u16_lut.clone(); mix_lut[7] = -3.0
 ref = ref_gemm(au.long(), bu.long(), mix_lut)
-report(torch.equal(u8(au, bu, mix_lut).double(), ref), 'mixed-range LUT (fp32)')
+report(torch.equal(u8(au, bu, mix_lut).double(), ref), 'mixed-range LUT (int32)')
 
 # exact-product LUTs == fp64 torch.mm
 aa = torch.arange(256, device=dev).float()
