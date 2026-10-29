@@ -26,7 +26,7 @@ def test_quantization_preserves_each_forward_scale(device, asymmetric):
     )
     scale = torch.tensor(0.5, device=device)
     zero_point = torch.tensor(128.0, device=device)
-    qmin, qmax = (0, 255) if asymmetric else (-127, 127)
+    qmin, qmax = (0, 255) if asymmetric else (-128, 127)
     outputs, expected_outputs, upstream = [], [], []
     expected_grad = torch.zeros_like(x)
 
@@ -55,7 +55,7 @@ def test_quantization_preserves_each_forward_scale(device, asymmetric):
     torch.testing.assert_close(x.grad, expected_grad, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("grad", ["ste", "lre", "custom"])
+@pytest.mark.parametrize("grad", ["ste", "true-ste", "lre", "custom"])
 @pytest.mark.parametrize("kernel", [1, 3])
 def test_conv_deferred_backward_matches_immediate_backward(device, grad, kernel):
     from approxtorch.nn import Conv2d_int8

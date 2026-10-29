@@ -18,7 +18,7 @@ from .nn._bf16_custom_grad import _validate_grad_luts
 
 IntQType = Literal["int8", "uint8"]
 FloatQType = Literal["fp16", "bf16"]
-GradType = Literal["ste", "lre", "custom"]
+GradType = Literal["ste", "true-ste", "lre", "custom"]
 
 __all__ = ["convert_int_model", "convert_float_model"]
 
@@ -208,6 +208,8 @@ def convert_int_model(
 
     int8 uses symmetric activations and per-channel symmetric weights.
     uint8 uses asymmetric activations and per-channel asymmetric weights.
+    For int8, grad='true-ste' uses the original floating-point input and weight
+    for an ordinary Conv2d backward, bypassing quantization masks and scales.
     The model is modified in place and returned, except when model itself is
     an nn.Conv2d; in that case the replacement module is returned.
 
@@ -228,10 +230,12 @@ def convert_int_model(
         raise ValueError(f"lut must have 65536 elements, got {lut.numel()}")
     if not lut.is_contiguous():
         raise ValueError("lut must be contiguous")
-    if grad not in ("ste", "lre", "custom"):
+    if grad not in ("ste", "true-ste", "lre", "custom"):
         raise ValueError(
-            f"grad must be 'ste', 'lre' or 'custom', got {grad!r}"
+            f"grad must be 'ste', 'true-ste', 'lre' or 'custom', got {grad!r}"
         )
+    if grad == "true-ste" and qtype != "int8":
+        raise ValueError("grad='true-ste' is supported only for qtype='int8'")
     if not isinstance(ignore_first_conv, bool):
         raise TypeError("ignore_first_conv must be a bool")
     if not isinstance(update_scale, bool):

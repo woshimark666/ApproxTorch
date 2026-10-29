@@ -68,7 +68,7 @@ def chain(m, x):
         x, m.scale_x, m.qmin, m.qmax)
     qmax_w = 2 ** (m.weight_bits - 1) - 1
     wq = quantization.static_quantize_int8(
-        m.weight, m.scale_w, -qmax_w, qmax_w, ch_axis=0)
+        m.weight, m.scale_w, -qmax_w - 1, qmax_w, ch_axis=0)
     return xq, wq, m.scale_w
 
 

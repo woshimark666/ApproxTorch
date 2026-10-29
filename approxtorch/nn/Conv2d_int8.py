@@ -6,6 +6,47 @@ import torch.nn as nn
 from torch.nn.modules.utils import _pair
 from . import bgemm_int8
 
+
+class _Conv2dTrueSTE(torch.autograd.Function):
+    """Keep the LUT forward, but differentiate an ordinary floating-point conv.
+
+    ``forward_quantized`` runs inside Function.forward's no-grad context. It
+    includes quantization, LUT convolution, dequantization and bias, so neither
+    quantization masks nor scale factors enter this surrogate backward.
+    """
+
+    @staticmethod
+    def forward(ctx, x, weight, bias, forward_quantized, geometry):
+        ctx.save_for_backward(x, weight)
+        ctx.geometry = geometry
+        return forward_quantized(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, weight = ctx.saved_tensors
+        stride, padding, dilation, groups = ctx.geometry
+        need_x, need_w, need_bias = ctx.needs_input_grad[:3]
+        grad_x = grad_w = None
+
+        if need_x or need_w:
+            # Use the same FP32 cuDNN policy as the integer-domain STE path.
+            prev_tf32 = torch.backends.cudnn.allow_tf32
+            prev_bench = torch.backends.cudnn.benchmark
+            torch.backends.cudnn.allow_tf32 = False
+            torch.backends.cudnn.benchmark = True
+            try:
+                grad_x, grad_w, _ = torch.ops.aten.convolution_backward(
+                    grad_output, x, weight, None, list(stride), list(padding),
+                    list(dilation), False, [0, 0], groups,
+                    [need_x, need_w, False])
+            finally:
+                torch.backends.cudnn.allow_tf32 = prev_tf32
+                torch.backends.cudnn.benchmark = prev_bench
+
+        grad_bias = grad_output.sum(dim=(0, 2, 3)) if need_bias else None
+        return grad_x, grad_w, grad_bias, None, None
+
+
 class Conv2d_int8(nn.Module): 
     def __init__(self,
                  in_channels: int,
@@ -40,13 +81,14 @@ class Conv2d_int8(nn.Module):
                 f"(groups == in_channels == out_channels), got groups={groups}, "
                 f"in={in_channels}, out={out_channels}")
         self.groups = groups
-        if grad not in ('ste', 'lre', 'custom'):
-            raise ValueError(f"grad must be 'ste', 'lre' or 'custom', got {grad}")
+        if grad not in ('ste', 'true-ste', 'lre', 'custom'):
+            raise ValueError(
+                f"grad must be 'ste', 'true-ste', 'lre' or 'custom', got {grad}")
         if grad == 'custom' and groups != 1:
             raise NotImplementedError(
                 "custom gradient currently supports only groups=1")
         self.grad = grad
-        self.qmin = -127
+        self.qmin = -128
         self.qmax = 127
         self.weight_bits = weight_bits
         if not 3 <= weight_bits <= 8:
@@ -93,7 +135,7 @@ class Conv2d_int8(nn.Module):
                 self.bias.copy_(bias)
 
         match grad:
-            case 'ste':
+            case 'ste' | 'true-ste':
                 pass
             case 'lre':
                 if dx is None or dw is None:
@@ -141,7 +183,9 @@ class Conv2d_int8(nn.Module):
             # 这样每个 rank 算出的 new_scale 完全一致，scale_x 始终保持同步。
             if dist.is_available() and dist.is_initialized():
                 dist.all_reduce(abs_max, op=dist.ReduceOp.MAX)
-            current_scale = abs_max / ((self.qmax - self.qmin) / 2 )
+            # Keep absmax/qmax consistent with weight scales and calib.py;
+            # the extra negative code does not change the scale convention.
+            current_scale = abs_max / self.qmax
             new_scale = self.scale_momentum * current_scale + (1 - self.scale_momentum) * self.scale_x
             self.scale_x.copy_(new_scale)
 
@@ -169,6 +213,19 @@ class Conv2d_int8(nn.Module):
 
 
     def forward(self, x: torch.Tensor):
+        if self.training and self.update_scale:
+            self._update_scale(x)
+            self._update_scale_w()
+
+        if self.grad == 'true-ste':
+            geometry = (self.stride, self.padding, self.dilation, self.groups)
+            return _Conv2dTrueSTE.apply(
+                x, self.weight, self.bias, self._forward_quantized, geometry)
+
+        return self._forward_quantized(x)
+
+    def _forward_quantized(self, x: torch.Tensor):
+        """Shared LUT forward; EMA updates are handled once by ``forward``."""
 
         # 0. compute output shape
         B, _, H, W = x.shape
@@ -180,17 +237,12 @@ class Conv2d_int8(nn.Module):
         OH = (H + 2 * pH - dH * (kH - 1) - 1) // sH + 1
         OW = (W + 2 * pW - dW * (kW - 1) - 1) // sW + 1
         
-        # 1. do quantization first 
-        #   check if we need to update scale:
-        if self.training and self.update_scale:
-            self._update_scale(x)
-            self._update_scale_w()
-
+        # 1. do quantization first
         x = quantization.static_quantize_int8(x, self.scale_x, self.qmin, self.qmax)
-        # 权重使用 EMA per-channel scale 做普通对称静态量化。
+        # 权重使用 EMA per-channel scale 和完整有符号范围，例如 8-bit [-128, 127]。
         qmax_w = 2 ** (self.weight_bits - 1) - 1
         w = quantization.static_quantize_int8(
-            self.weight, self.scale_w, -qmax_w, qmax_w, ch_axis=0)
+            self.weight, self.scale_w, -qmax_w - 1, qmax_w, ch_axis=0)
         s_w = self.scale_w
 
         # 2. + 3. im2col + bgemm

@@ -70,8 +70,8 @@ exact_lut = signed.view(-1, 1) * signed.view(1, -1)
 dx_exact = signed.view(1, -1).expand(256, 256).contiguous()
 dw_exact = signed.view(-1, 1).expand(256, 256).contiguous()
 
-x = torch.randint(-127, 128, (2, 17, 13), device=device).float()
-w = torch.randint(-127, 128, (11, 17), device=device).float()
+x = torch.randint(-128, 128, (2, 17, 13), device=device).float()
+w = torch.randint(-128, 128, (11, 17), device=device).float()
 x.requires_grad_(True)
 w.requires_grad_(True)
 go = torch.randn(2, 11, 13, device=device)
@@ -116,7 +116,7 @@ for kernel, stride, padding, dilation in [
         x_ref, module.scale_x, module.qmin, module.qmax)
     qmax_w = 2 ** (module.weight_bits - 1) - 1
     wq = quantization.static_quantize_int8(
-        w_ref, module.scale_w, -qmax_w, qmax_w, ch_axis=0)
+        w_ref, module.scale_w, -qmax_w - 1, qmax_w, ch_axis=0)
     y_ref = F.conv2d(
         xq, wq, None, stride, padding, dilation, 1)
     y_ref = torch.addcmul(

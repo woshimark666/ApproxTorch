@@ -74,11 +74,11 @@ for (B, C, H, O, k, s, p) in shapes:
         t = {}
         t['0 absmax (x.abs().max)'] = evtime(lambda: x0.abs().max())
         t['0b vector_norm inf    '] = evtime(lambda: torch.linalg.vector_norm(x0, torch.inf))
-        xq = at.nn.quantization.static_quantize_int8(x0, m.scale_x, -127, 127)
-        t['1 fakequant x (fused) '] = evtime(lambda: torch.ops.approxtorch.fakequant_per_tensor_claude.default(x0, m.scale_x, -127, 127))
+        xq = at.nn.quantization.static_quantize_int8(x0, m.scale_x, m.qmin, m.qmax)
+        t['1 fakequant x (fused) '] = evtime(lambda: torch.ops.approxtorch.fakequant_per_tensor_claude.default(x0, m.scale_x, m.qmin, m.qmax))
         qmax_w = 2 ** (m.weight_bits - 1) - 1
         t['2 fakequant w (python)'] = evtime(lambda: at.nn.quantization.static_quantize_int8(
-            m.weight, m.scale_w, -qmax_w, qmax_w, ch_axis=0))
+            m.weight, m.scale_w, -qmax_w - 1, qmax_w, ch_axis=0))
         t['3 xq_pre cast .to(i8) '] = evtime(lambda: xq.detach().to(torch.int8))
         if k != 1:
             t['4 unfold fp32         '] = evtime(lambda: F.unfold(xq, (k, k), padding=p, stride=s))
@@ -90,7 +90,7 @@ for (B, C, H, O, k, s, p) in shapes:
                 print('   unfold int8 unsupported:', type(ex).__name__, str(ex)[:80])
         xu = F.unfold(xq, (k, k), padding=p, stride=s) if k != 1 else xq.flatten(2)
         wq = at.nn.quantization.static_quantize_int8(
-            m.weight, m.scale_w, -qmax_w, qmax_w, ch_axis=0)
+            m.weight, m.scale_w, -qmax_w - 1, qmax_w, ch_axis=0)
         sw = m.scale_w
         wf = wq.view(O, -1)
         t['5 bgemm fwd (no save) '] = evtime(lambda: at.backend.ops.bgemm_fake_int8_claude(xu, wf, lut))
@@ -110,7 +110,7 @@ for (B, C, H, O, k, s, p) in shapes:
             go, xi8_img, wT, dx, dw, (k, k), (s, s), (p, p), (1, 1))
         if k != 1:
             t['8 fold (unfold bwd)   '] = evtime(lambda: F.fold(gx_unf, (H, H), (k, k), padding=p, stride=s))
-        mask = torch.ops.approxtorch.fakequant_per_tensor_claude.default(x0, m.scale_x, -127, 127)[1]
+        mask = torch.ops.approxtorch.fakequant_per_tensor_claude.default(x0, m.scale_x, m.qmin, m.qmax)[1]
         gimg = torch.randn(B, C, H, H, device=dev)
         t['9 fakequant x bwd     '] = evtime(lambda: torch.ops.approxtorch.fakequant_per_tensor_backward_claude.default(gimg, mask, m.scale_x))
 

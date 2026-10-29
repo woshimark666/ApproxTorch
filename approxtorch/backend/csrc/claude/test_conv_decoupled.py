@@ -35,7 +35,7 @@ def old_path(m, x):
         x, m.scale_x, m.qmin, m.qmax)
     qmax_w = 2 ** (m.weight_bits - 1) - 1
     w = quantization.static_quantize_int8(
-        m.weight, m.scale_w, -qmax_w, qmax_w, ch_axis=0)
+        m.weight, m.scale_w, -qmax_w - 1, qmax_w, ch_axis=0)
     s_w = m.scale_w
     xu = F.unfold(xq, m.kernel_size, dilation=m.dilation,
                   padding=m.padding, stride=m.stride)
@@ -71,8 +71,8 @@ def fp64_grads(m, x, go):
         qmaxw = 2 ** (m.weight_bits - 1) - 1
         s_w = m.scale_w
         ws = m.weight / s_w.view(-1, 1, 1, 1)
-        wmask = (ws >= -qmaxw) & (ws <= qmaxw)
-        wq = torch.clamp(torch.round(ws), -qmaxw, qmaxw)
+        wmask = (ws >= -qmaxw - 1) & (ws <= qmaxw)
+        wq = torch.clamp(torch.round(ws), -qmaxw - 1, qmaxw)
         scale_x = scale_x.double()
         s_w = s_w.double()
         # unfold
@@ -167,7 +167,7 @@ def check(tag, B, C, H, W, O, k, s=1, p=0, d=1, bias=True, train=True,
 # component-level: im2col_u8 vs quantized fp32 unfold must be bit-identical
 def check_im2col(B, C, H, W, k, s, p, d):
     global nfail
-    x8 = torch.randint(-127, 128, (B, C, H, W), device=dev, dtype=torch.int8)
+    x8 = torch.randint(-128, 128, (B, C, H, W), device=dev, dtype=torch.int8)
     ref = (F.unfold(x8.float(), (k, k), dilation=d, padding=p, stride=s)
            + 128).to(torch.uint8)
     got = at.backend.ops.im2col_u8(x8, (k, k), (s, s), (p, p), (d, d))
@@ -182,7 +182,7 @@ def check_maps():
     lut = torch.randn(256, device=dev)
     w8 = torch.randint(0, 256, (37, 129), device=dev, dtype=torch.uint8)
     ok1 = torch.equal(at.backend.ops.lut_map(w8, lut), lut[w8.long()])
-    x8 = torch.randint(-127, 128, (3, 5, 9, 11), device=dev, dtype=torch.int8)
+    x8 = torch.randint(-128, 128, (3, 5, 9, 11), device=dev, dtype=torch.int8)
     ref = F.pad(lut[(x8.long() + 128)], (2, 2, 1, 1), value=float(lut[128]))
     ok2 = torch.equal(at.backend.ops.lut_map_pad(x8, lut, (1, 2)), ref)
     if not (ok1 and ok2):
@@ -246,8 +246,8 @@ def check_dwconv_op(B, C, H, W, k, s, p, d, int_lut=True):
         lut = torch.randint(-127*127, 127*127, (256, 256), device=dev).float()
     else:
         lut = torch.randint(-100000, 100000, (256, 256), device=dev).float()  # int32 LUT path
-    x8 = torch.randint(-127, 128, (B, C, H, W), device=dev, dtype=torch.int8)
-    w = torch.randint(-127, 128, (C, k * k), device=dev).float()
+    x8 = torch.randint(-128, 128, (B, C, H, W), device=dev, dtype=torch.int8)
+    w = torch.randint(-128, 128, (C, k * k), device=dev).float()
     y, wq = at.backend.ops.dwconv_fake_int8_claude(
         x8, w, lut, (k, k), (s, s), (p, p), (d, d))
     OH = (H + 2*p - d*(k-1) - 1)//s + 1
@@ -276,8 +276,8 @@ def fp64_grads_dw(m, x, go):
         qmaxw = 2 ** (m.weight_bits - 1) - 1
         s_w = m.scale_w
         ws = m.weight / s_w.view(-1, 1, 1, 1)
-        wmask = (ws >= -qmaxw) & (ws <= qmaxw)
-        wq = torch.clamp(torch.round(ws), -qmaxw, qmaxw)
+        wmask = (ws >= -qmaxw - 1) & (ws <= qmaxw)
+        wq = torch.clamp(torch.round(ws), -qmaxw - 1, qmaxw)
 
         xu = F.unfold(xq, m.kernel_size, dilation=m.dilation, padding=m.padding,
                       stride=m.stride).view(B, C, kk, -1).double()  # [B,C,kk,L]
@@ -330,7 +330,7 @@ def check_dw(tag, B, C, H, W, k, s=1, p=0, d=1, bias=True, mode='lre'):
             x0, m.scale_x, m.qmin, m.qmax)
         qmax_w = 2 ** (m.weight_bits - 1) - 1
         wr = quantization.static_quantize_int8(
-            m.weight, m.scale_w, -qmax_w, qmax_w, ch_axis=0)
+            m.weight, m.scale_w, -qmax_w - 1, qmax_w, ch_axis=0)
         s_wr = m.scale_w
         yr = dw_ref_y(xqr, wr.view(C, -1), m.lut, m.kernel_size,
                       m.stride, m.padding, m.dilation)

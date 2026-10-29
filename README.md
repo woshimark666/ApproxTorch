@@ -22,6 +22,8 @@ mantissa LUTs for approximate **FP16 and BF16** GEMM and BGEMM.
   accumulation and one final 16-bit conversion.
 - 🔁 **Gradient estimators** for backpropagating through the non-differentiable LUT:
   - **STE** — straight-through estimator (default)
+  - **True STE** — ordinary Conv2d gradients on the original floating-point
+    input and weight (int8 only)
   - **LRE** — linear-regression-estimated gradient LUTs
   - **Custom** — one derivative for every quantized `(x, w)` pair
 - ⚖️ **EMA quantization**: per-tensor activation scale and per-channel weight scale are EMA-updated during training, with arbitrary weight bit-width (**3–8 bit**) for int8 weights.
@@ -99,7 +101,7 @@ model = resnet18(num_classes=10)
 model = at.convert_int_model(
     model, lut,
     qtype='int8',             # 'int8' | 'uint8'
-    grad='ste',               # gradient estimator: 'ste' | 'lre' | 'custom'
+    grad='ste',               # 'ste' | 'true-ste' (int8 only) | 'lre' | 'custom'
     ignore_first_conv=True,   # keep the first conv exact (common QAT practice)
     weight_bits=8,            # 3–8 for int8; uint8 is fixed at 8
 ).to(device)
@@ -111,15 +113,38 @@ out.sum().backward()
 
 During training, both activation and per-channel weight scales are updated as exponential moving averages (controlled by `scale_momentum`). Call `model.eval()` (or `freeze_scale()` on a layer) to stop scale updates for inference.
 
+Int8 activations use the full `[-128, 127]` range. Signed weights use
+`[-2**(weight_bits - 1), 2**(weight_bits - 1) - 1]`, so 8-bit weights also use
+`[-128, 127]` and 4-bit weights use `[-8, 7]`. Zero maps to LUT index 128 and
+`-128` maps to index 0. Scales retain the `absmax/qmax` convention used by
+calibration: `absmax/127` for activations and `absmax/(2**(weight_bits - 1) - 1)`
+per output channel for weights. These ranges apply to every int8 gradient mode.
+
 ## Gradient Estimators
 
-An approximate multiplier is a discrete function, so its true gradient is not defined. ApproxTorch provides three ways to backpropagate through it:
+An approximate multiplier is a discrete function, so its true gradient is not defined. ApproxTorch provides these surrogate gradients:
 
 | `grad=`   | Idea | Extra inputs needed |
 |-----------|------|---------------------|
-| `'ste'`   | Pretend the multiply was exact (straight-through estimator) | none |
+| `'ste'`   | Exact-multiply gradients on quantized operands, with quantization masks and scales | none |
+| `'true-ste'` | Ordinary Conv2d gradients on the original floating-point input and weight (int8 only) | none |
 | `'lre'`   | Fit a line to each row/column of the LUT; use slopes as gradients | `dx`, `dw` gradient LUTs |
 | `'custom'` | Use one derivative for each quantized `(x, w)` pair | 256×256 `dx`, `dw` gradient LUTs |
+
+For int8, `grad='true-ste'` preserves the same quantization, LUT convolution,
+dequantization, bias and EMA updates as `grad='ste'`. Its backward uses the
+original floating-point `x` and `weight`, with the incoming output gradient,
+as an ordinary `torch.nn.functional.conv2d` would. It bypasses quantization
+clipping masks and scale factors entirely, including for saturated values;
+bias gradients are the sum of the incoming gradient. Scales and LUTs remain
+non-learned buffers. This applies to both groups=1 and the supported depthwise
+case (`groups == in_channels == out_channels`). Saving the floating-point
+operands increases backward activation storage compared with the existing STE.
+
+```python
+model = at.convert_int_model(model, lut, qtype='int8', grad='true-ste')
+# The layer constructor also accepts Conv2d_int8(..., grad='true-ste').
+```
 
 The helper module `approxtorch.grad_lut` generates these extra inputs directly from your multiplier LUT:
 
@@ -230,7 +255,7 @@ at.convert_int_model(
     model,                    # any nn.Module
     lut,                      # LUT tensor from at.load_lut.load_lut(...)
     qtype='int8',             # 'int8' | 'uint8'
-    grad='ste',               # 'ste' | 'lre' | 'custom'
+    grad='ste',               # 'ste' | 'true-ste' (int8 only) | 'lre' | 'custom'
     dx=None, dw=None,         # gradient LUTs, required for 'lre'/'custom'
     ignore_first_conv=True,   # leave the first Conv2d untouched
     scale_momentum=0.05,      # EMA momentum for quantization statistics

@@ -3,7 +3,7 @@
 两种方案 × 两种粒度，qmin/qmax 上下界均可自定义：
 
   int8 对称（无 zero_point）      q = clamp(round(x/s),     qmin, qmax)
-      反量化 x ≈ q * s              默认 [qmin, qmax] = [-127, 127]
+      反量化 x ≈ q * s              默认 [qmin, qmax] = [-128, 127]
   uint8 非对称（带 zero_point）   q = clamp(round(x/s + z), qmin, qmax)
       反量化 x ≈ (q - z) * s        默认 [qmin, qmax] = [0, 255]
 
@@ -154,14 +154,14 @@ def _check_per_channel_param(name, p, x, ch_axis):
             f"(= x.shape[{ch_axis}]), got {p.numel()}")
 
 
-def static_quantize_int8(x, scale, qmin=-127, qmax=127, ch_axis=None):
+def static_quantize_int8(x, scale, qmin=-128, qmax=127, ch_axis=None):
     """int8 静态对称量化：q = clamp(round(x/scale), qmin, qmax)，反量化 x ≈ q*scale。
 
     x:         输入 float tensor
     scale:     per-tensor: 标量（1 元素 tensor / python 数）
                per-channel: 形状 [x.shape[ch_axis]] 的 tensor
-    qmin/qmax: 量化上下界，默认 [-127, 127]（对称、不含 -128），可自定义
-               （如 6-bit 对称用 [-31, 31]）
+    qmin/qmax: 量化上下界，默认完整 int8 范围 [-128, 127]（zero_point=0），可自定义
+               （如 6-bit 使用 [-32, 31]）
     ch_axis:   None = per-tensor；int = per-channel 的通道维
                （激活 NCHW 用 1，权重 OIHW 用 0）
     return:    q —— float dtype 的整数值 tensor
